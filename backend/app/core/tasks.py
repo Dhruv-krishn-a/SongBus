@@ -25,12 +25,18 @@ def create_task(name: str, total: int = 0) -> str:
 def update_task(task_id: str, status: str = None, progress: int = None, total: int = None, message: str = None, result: Any = None, error: str = None):
     if task_id in _tasks:
         task = _tasks[task_id]
-        if status is not None: task["status"] = status
-        if progress is not None: task["progress"] = progress
-        if total is not None: task["total"] = total
-        if message is not None: task["message"] = message
-        if result is not None: task["result"] = result
-        if error is not None: task["error"] = error
+        if status is not None:
+            task["status"] = status
+        if progress is not None:
+            task["progress"] = progress
+        if total is not None:
+            task["total"] = total
+        if message is not None:
+            task["message"] = message
+        if result is not None:
+            task["result"] = result
+        if error is not None:
+            task["error"] = error
         task["updated_at"] = datetime.utcnow().isoformat()
 
 def get_task(task_id: str) -> Dict[str, Any]:

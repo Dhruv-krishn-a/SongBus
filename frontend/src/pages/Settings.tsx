@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { 
   ShieldAlert, Database, Trash2, CheckCircle2, 
-  AlertCircle, Info, Disc3, Music2, RefreshCw, X 
+  AlertCircle, Info, Disc3, Music2, RefreshCw,  
 } from 'lucide-react';
 
 type ModalConfig = {
@@ -20,7 +20,7 @@ export default function Settings() {
   const [loading, setLoading] = useState(false);
   const [browserAuth, setBrowserAuth] = useState('');
   const [savingBrowserAuth, setSavingBrowserAuth] = useState(false);
-  const [browserAuthMessage, setBrowserAuthMessage] = useState('');
+
 
   // Custom Modal State
   const [modal, setModal] = useState<ModalConfig>({
@@ -104,7 +104,7 @@ export default function Settings() {
     if (!token || !browserAuth.trim()) return;
 
     setSavingBrowserAuth(true);
-    setBrowserAuthMessage('');
+
     try {
       const res = await fetch('/api/integrations/youtube/browser-auth', {
         method: 'POST',

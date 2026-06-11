@@ -53,3 +53,4 @@ backend/browser.json
 # OS
 .DS_Store
 Thumbs.db
+backend/tmp_oauth.json

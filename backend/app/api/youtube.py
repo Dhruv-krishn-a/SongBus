@@ -8,6 +8,7 @@ from app.core import tasks
 from ytmusicapi import YTMusic
 import os
 import re
+import time
 from datetime import datetime, timedelta, timezone
 
 import requests
@@ -148,23 +149,29 @@ def parse_youtube_api_error(response: Response) -> str:
         return response.text
 
 
-def get_ytmusic_browser_auth_path() -> str:
-    return os.getenv("YTMUSIC_BROWSER_AUTH_PATH", os.path.join(os.path.dirname(__file__), "..", "..", "browser.json"))
-
-
-def get_ytmusic_client() -> YTMusic:
-    auth_path = os.path.abspath(get_ytmusic_browser_auth_path())
-    if not os.path.exists(auth_path):
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "YouTube Music browser authentication is not configured. "
-                f"Add a browser auth file at {auth_path} or set YTMUSIC_BROWSER_AUTH_PATH."
-            ),
-        )
-    from app.api.integrations import sanitize_browser_auth_file
-    sanitize_browser_auth_file(auth_path)
-    return YTMusic(auth_path)
+def get_ytmusic_oauth_client(current_user: schema.User) -> YTMusic:
+    if not current_user.yt_access_token:
+        raise HTTPException(status_code=400, detail="YouTube Music is not connected.")
+    
+    client_id = os.getenv("YTMUSIC_OAUTH_CLIENT_ID")
+    client_secret = os.getenv("YTMUSIC_OAUTH_CLIENT_SECRET")
+    
+    expires_at = int(current_user.yt_token_expiry.timestamp()) if current_user.yt_token_expiry else int(time.time() + 3600)
+    
+    auth_dict = {
+        "access_token": current_user.yt_access_token,
+        "refresh_token": current_user.yt_refresh_token,
+        "expires_at": expires_at,
+        "expires_in": max(0, expires_at - int(time.time())),
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "scope": "https://www.googleapis.com/auth/youtube",
+        "token_type": "Bearer"
+    }
+    
+    from ytmusicapi.auth.oauth import OAuthCredentials
+    oauth_creds = OAuthCredentials(client_id=client_id, client_secret=client_secret)
+    return YTMusic(auth=auth_dict, oauth_credentials=oauth_creds)
 
 
 def serialize_ytmusic_track(track: dict) -> dict:
@@ -207,8 +214,29 @@ def collect_liked_videos(
         payload = response.json()
         for item in payload.get("items", []):
             snippet = item.get("snippet", {})
-            if music_only and snippet.get("categoryId") and snippet.get("categoryId") != "10":
-                continue
+            
+            if music_only:
+                cat_id = snippet.get("categoryId")
+                is_music = (cat_id == "10") # 10 is the official Music category
+                
+                # If not strictly categorized as music, check titles and channels for strong signals
+                if not is_music:
+                    title = snippet.get("title", "").lower()
+                    channel = snippet.get("channelTitle", "").lower()
+                    
+                    music_title_keywords = [
+                        "official video", "music video", "official audio", 
+                        "lyric", "live performance", "feat.", "ft.", "official visualizer"
+                    ]
+                    music_channel_keywords = ["vevo", " - topic"]
+                    
+                    if any(k in title for k in music_title_keywords) or \
+                       any(k in channel for k in music_channel_keywords):
+                        is_music = True
+                
+                if not is_music:
+                    continue
+
             items.append(item)
 
         next_page_token = payload.get("nextPageToken")
@@ -300,41 +328,19 @@ def upsert_playlist_for_user(
 @router.get("/youtube/playlists")
 def list_youtube_playlists(current_user: schema.User = Depends(get_current_user), db: Session = Depends(get_db)):
     try:
-        ytmusic = get_ytmusic_client()
-        liked_songs_playlist = ytmusic.get_playlist("LM", limit=1)
-        ytmusic_playlists = ytmusic.get_library_playlists(limit=None)
         liked_videos = collect_liked_videos(current_user, db, music_only=False)
 
         playlists_map = {
-            "__liked_songs__": {
-                "id": "__liked_songs__",
-                "title": "Liked songs",
-                "description": "Imported from your YouTube Music liked songs",
-                "track_count": liked_songs_playlist.get("trackCount", 0),
-                "source": "ytmusic",
-            },
             "__liked_videos__": {
                 "id": "__liked_videos__",
-                "title": "Liked videos",
-                "description": "Imported from your YouTube liked videos",
+                "title": "Liked Music",
+                "description": "Imported from your YouTube liked music videos",
                 "track_count": len(liked_videos),
                 "source": "youtube",
             },
         }
 
-        for playlist in ytmusic_playlists:
-            pid = playlist.get("playlistId")
-            if pid:
-                playlists_map[pid] = {
-                    "id": pid,
-                    "title": playlist.get("title", "Untitled Playlist"),
-                    "description": "Imported from your YouTube Music library",
-                    "track_count": playlist.get("count", 0),
-                    "source": "ytmusic",
-                }
-
         next_page_token = None
-
         while True:
             response = request_with_refresh(
                 current_user,
@@ -392,9 +398,12 @@ def _import_playlist_task(task_id: str, playlist_id: str, user_id: int):
         def get_or_create_track(title, artist, album, duration_ms, ext_id, thumbnail_url=None):
             if ext_id in existing_tracks:
                 t = existing_tracks[ext_id]
-                if not t.album and album: t.album = album
-                if not t.duration_ms and duration_ms: t.duration_ms = duration_ms
-                if not t.thumbnail_url and thumbnail_url: t.thumbnail_url = thumbnail_url
+                if not t.album and album:
+                    t.album = album
+                if not t.duration_ms and duration_ms:
+                    t.duration_ms = duration_ms
+                if not t.thumbnail_url and thumbnail_url:
+                    t.thumbnail_url = thumbnail_url
                 return t, False
 
             t = schema.Track(
@@ -410,7 +419,6 @@ def _import_playlist_task(task_id: str, playlist_id: str, user_id: int):
             t.genre = AnalysisEngine.classify_genre(t)
             t.mood = AnalysisEngine.classify_mood(t)
             db.add(t)
-            db.flush()
             existing_tracks[ext_id] = t
             return t, True
 
@@ -419,53 +427,35 @@ def _import_playlist_task(task_id: str, playlist_id: str, user_id: int):
         processed_count = 0
         playlist_title = ""
 
+        # Handle cached '__liked_songs__' from earlier ytmusicapi implementation
         if playlist_id == "__liked_songs__":
-            tasks.update_task(task_id, message="Fetching Liked Songs...")
-            ytmusic = get_ytmusic_client()
-            liked_playlist = ytmusic.get_playlist("LM", limit=None)
-            playlist_title = liked_playlist.get("title") or "Liked songs"
-            local_playlist = upsert_playlist_for_user(current_user, db, playlist_id, playlist_title)
+            playlist_id = "__liked_videos__"
+
+        if playlist_id == "__liked_videos__":
+            tasks.update_task(task_id, message="Fetching Liked Music...")
+            playlist_title = "Liked Music"
+            items = collect_liked_videos(current_user, db, music_only=True)
+            local_playlist = upsert_playlist_for_user(current_user, db, playlist_id=playlist_id, playlist_name=playlist_title)
             existing_links = {pt.track_id for pt in db.query(schema.PlaylistTrack).filter(schema.PlaylistTrack.playlist_id == local_playlist.id).all()}
-
-            tracks_to_process = liked_playlist.get("tracks", [])
-            tasks.update_task(task_id, total=len(tracks_to_process))
-
-            for item in tracks_to_process:
-                processed_count += 1
-                tasks.update_task(task_id, progress=processed_count, message=f"Processing {processed_count}/{len(tracks_to_process)}")
-
-                normalized = serialize_ytmusic_track(item)
-                video_id = normalized.get("videoId")
-                if not video_id: continue
-
-                track, created = get_or_create_track(
-                    normalized["title"], normalized["artist"], normalized["album"],
-                    normalized["duration_ms"], video_id, normalized.get("thumbnail_url")
-                )
-                if created: imported_count += 1
-
-                if track.id not in existing_links:
-                    db.add(schema.PlaylistTrack(playlist_id=local_playlist.id, track_id=track.id))
-                    existing_links.add(track.id)
-                    linked_count += 1
-
-        elif playlist_id == "__liked_videos__":
-            tasks.update_task(task_id, message="Fetching Liked Videos...")
-            playlist_title = "Liked videos"
-            items = collect_liked_videos(current_user, db, music_only=False)
-            local_playlist = upsert_playlist_for_user(current_user, db, playlist_id, playlist_title)
-            existing_links = {pt.track_id for pt in db.query(schema.PlaylistTrack).filter(schema.PlaylistTrack.playlist_id == local_playlist.id).all()}
+            processed_video_ids = set()
 
             tasks.update_task(task_id, total=len(items))
 
             for item in items:
                 processed_count += 1
-                tasks.update_task(task_id, progress=processed_count, message=f"Processing {processed_count}/{len(items)}")
+                if processed_count % 100 == 0:
+                    tasks.update_task(task_id, progress=processed_count, message=f"Processing {processed_count}/{len(items)}")
+                    db.flush()
 
                 snippet = item.get("snippet", {})
                 content_details = item.get("contentDetails", {})
                 video_id = item.get("id")
-                if not video_id: continue
+                if not video_id:
+                    continue
+
+                if video_id in processed_video_ids:
+                    continue
+                processed_video_ids.add(video_id)
 
                 thumbnails = snippet.get("thumbnails", {})
                 thumb = thumbnails.get("high") or thumbnails.get("medium") or thumbnails.get("default")
@@ -475,112 +465,94 @@ def _import_playlist_task(task_id: str, playlist_id: str, user_id: int):
                     snippet.get("title", "Unknown Title"), snippet.get("channelTitle"), None,
                     duration_to_ms(content_details.get("duration")), video_id, thumb_url
                 )
-                if created: imported_count += 1
+                if created:
+                    imported_count += 1
 
-                if track.id not in existing_links:
-                    db.add(schema.PlaylistTrack(playlist_id=local_playlist.id, track_id=track.id))
-                    existing_links.add(track.id)
+                if getattr(track, "id", None) not in existing_links:
+                    db.add(schema.PlaylistTrack(playlist_id=local_playlist.id, track=track))
+                    if getattr(track, "id", None) is not None:
+                        existing_links.add(track.id)
                     linked_count += 1
+            db.flush()
 
         else:
             tasks.update_task(task_id, message="Fetching Playlist...")
-            ytmusic = get_ytmusic_client()
-            ytmusic_playlist_ids = {playlist.get("playlistId") for playlist in ytmusic.get_library_playlists(limit=None)}
+            playlist_title = None
+            next_page_token = None
+            local_playlist = None
 
-            if playlist_id in ytmusic_playlist_ids:
-                playlist = ytmusic.get_playlist(playlist_id, limit=None)
-                playlist_title = playlist.get("title") or "Imported YouTube Music Playlist"
-                local_playlist = upsert_playlist_for_user(current_user, db, playlist_id, playlist_title)
-                existing_links = {pt.track_id for pt in db.query(schema.PlaylistTrack).filter(schema.PlaylistTrack.playlist_id == local_playlist.id).all()}
+            # Fetch all video IDs
+            all_items = []
+            while True:
+                response = request_with_refresh(current_user, db, lambda token: fetch_playlist_items_response(token, playlist_id, next_page_token))
+                if response.status_code != 200:
+                    raise Exception(f"Failed to fetch YouTube playlist items: {parse_youtube_api_error(response)}")
+                payload = response.json()
+                all_items.extend(payload.get("items", []))
+                next_page_token = payload.get("nextPageToken")
+                if not next_page_token:
+                    break
 
-                tracks_to_process = playlist.get("tracks", [])
-                tasks.update_task(task_id, total=len(tracks_to_process))
+            tasks.update_task(task_id, total=len(all_items))
 
-                for item in tracks_to_process:
-                    processed_count += 1
-                    tasks.update_task(task_id, progress=processed_count, message=f"Processing {processed_count}/{len(tracks_to_process)}")
+            video_ids = []
+            playlist_item_lookup = {}
+            for item in all_items:
+                snippet = item.get("snippet", {})
+                if playlist_title is None:
+                    playlist_title = snippet.get("playlistTitle") or "Imported YouTube Playlist"
+                resource = snippet.get("resourceId", {})
+                video_id = resource.get("videoId")
+                if not video_id:
+                    continue
+                video_ids.append(video_id)
+                playlist_item_lookup[video_id] = item
 
-                    normalized = serialize_ytmusic_track(item)
-                    video_id = normalized.get("videoId")
-                    if not video_id: continue
+            local_playlist = upsert_playlist_for_user(current_user, db, playlist_id=playlist_id, playlist_name=playlist_title or "Imported YouTube Playlist")
+            existing_links = {pt.track_id for pt in db.query(schema.PlaylistTrack).filter(schema.PlaylistTrack.playlist_id == local_playlist.id).all()}
+            processed_video_ids = set()
 
-                    track, created = get_or_create_track(
-                        normalized["title"], normalized["artist"], normalized["album"],
-                        normalized["duration_ms"], video_id, normalized.get("thumbnail_url")
-                    )
-                    if created: imported_count += 1
+            # Fetch video details in batches of 50
+            video_details = {}
+            for i in range(0, len(video_ids), 50):
+                batch_ids = video_ids[i:i+50]
+                videos_response = request_with_refresh(current_user, db, lambda token: fetch_videos_response(token, batch_ids))
+                if videos_response.status_code == 200:
+                    for video in videos_response.json().get("items", []):
+                        video_details[video.get("id")] = video
 
-                    if track.id not in existing_links:
-                        db.add(schema.PlaylistTrack(playlist_id=local_playlist.id, track_id=track.id))
-                        existing_links.add(track.id)
-                        linked_count += 1
-            else:
-                # Fallback API
-                playlist_title = None
-                next_page_token = None
-                local_playlist = None
+            for video_id in video_ids:
+                if video_id in processed_video_ids:
+                    continue
+                processed_video_ids.add(video_id)
 
-                # Try to fetch all video IDs first
-                all_items = []
-                while True:
-                    response = request_with_refresh(current_user, db, lambda token: fetch_playlist_items_response(token, playlist_id, next_page_token))
-                    if response.status_code != 200:
-                        raise Exception(f"Failed to fetch YouTube playlist items: {parse_youtube_api_error(response)}")
-                    payload = response.json()
-                    all_items.extend(payload.get("items", []))
-                    next_page_token = payload.get("nextPageToken")
-                    if not next_page_token:
-                        break
-
-                tasks.update_task(task_id, total=len(all_items))
-
-                video_ids = []
-                playlist_item_lookup = {}
-                for item in all_items:
-                    snippet = item.get("snippet", {})
-                    if playlist_title is None:
-                        playlist_title = snippet.get("playlistTitle") or "Imported YouTube Playlist"
-                    resource = snippet.get("resourceId", {})
-                    video_id = resource.get("videoId")
-                    if not video_id: continue
-                    video_ids.append(video_id)
-                    playlist_item_lookup[video_id] = item
-
-                local_playlist = upsert_playlist_for_user(current_user, db, playlist_id, playlist_title or "Imported YouTube Playlist")
-                existing_links = {pt.track_id for pt in db.query(schema.PlaylistTrack).filter(schema.PlaylistTrack.playlist_id == local_playlist.id).all()}
-
-                # Fetch video details in batches of 50
-                video_details = {}
-                for i in range(0, len(video_ids), 50):
-                    batch_ids = video_ids[i:i+50]
-                    videos_response = request_with_refresh(current_user, db, lambda token: fetch_videos_response(token, batch_ids))
-                    if videos_response.status_code == 200:
-                        for video in videos_response.json().get("items", []):
-                            video_details[video.get("id")] = video
-
-                for video_id in video_ids:
-                    processed_count += 1
+                processed_count += 1
+                if processed_count % 100 == 0:
                     tasks.update_task(task_id, progress=processed_count, message=f"Processing {processed_count}/{len(video_ids)}")
+                    db.flush()
 
-                    item = playlist_item_lookup[video_id]
-                    detail = video_details.get(video_id, {})
-                    snippet = detail.get("snippet") or item.get("snippet", {})
-                    content_details = detail.get("contentDetails", {})
+                item = playlist_item_lookup[video_id]
+                detail = video_details.get(video_id, {})
+                snippet = detail.get("snippet") or item.get("snippet", {})
+                content_details = detail.get("contentDetails", {})
 
-                    thumbnails = snippet.get("thumbnails", {})
-                    thumb = thumbnails.get("high") or thumbnails.get("medium") or thumbnails.get("default")
-                    thumb_url = thumb.get("url") if thumb else None
+                thumbnails = snippet.get("thumbnails", {})
+                thumb = thumbnails.get("high") or thumbnails.get("medium") or thumbnails.get("default")
+                thumb_url = thumb.get("url") if thumb else None
 
-                    track, created = get_or_create_track(
-                        snippet.get("title", "Unknown Title"), snippet.get("videoOwnerChannelTitle") or snippet.get("channelTitle"), None,
-                        duration_to_ms(content_details.get("duration")), video_id, thumb_url
-                    )
-                    if created: imported_count += 1
+                track, created = get_or_create_track(
+                    snippet.get("title", "Unknown Title"), snippet.get("videoOwnerChannelTitle") or snippet.get("channelTitle"), None,
+                    duration_to_ms(content_details.get("duration")), video_id, thumb_url
+                )
+                if created:
+                    imported_count += 1
 
-                    if track.id not in existing_links:
-                        db.add(schema.PlaylistTrack(playlist_id=local_playlist.id, track_id=track.id))
+                if getattr(track, "id", None) not in existing_links:
+                    db.add(schema.PlaylistTrack(playlist_id=local_playlist.id, track=track))
+                    if getattr(track, "id", None) is not None:
                         existing_links.add(track.id)
-                        linked_count += 1
+                    linked_count += 1
+            db.flush()
 
         db.commit()
         result = {

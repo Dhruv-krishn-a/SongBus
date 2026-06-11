@@ -229,7 +229,7 @@ class AnalysisEngine:
                             time.sleep(2 ** attempt) # Exponential backoff: 1s, 2s
                             continue
                         else:
-                            return {"error": f"AI API is currently overloaded. Please try again in a few minutes."}
+                            return {"error": "AI API is currently overloaded. Please try again in a few minutes."}
                     else:
                         return {"error": f"AI API Error: {response.text}"}
                 except Exception as e:

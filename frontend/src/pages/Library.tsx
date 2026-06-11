@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { 
   Wand2, X, Check, Search, Filter, ChevronLeft, ChevronRight, 
-  Music2, Calendar, Clock, Trash2, ArrowUp, ArrowDown, 
+  Music2,  Clock, Trash2, ArrowUp, ArrowDown, 
   AlertCircle, Info, CheckCircle2, RefreshCw, Loader2, Brain
 } from 'lucide-react';
 
@@ -202,10 +202,70 @@ const Library = () => {
     fetchTracks(newPage);
   };
 
+  const pollTask = useCallback(async (taskId: string) => {
+    const poll = async () => {
+      try {
+        const res = await fetch(`/api/tasks/${taskId}`, {
+          headers: { Authorization: `Bearer ${token}` }
+        });
+        if (!res.ok) {
+           setImporting(false);
+           return;
+        }
+        const task = await res.json();
+
+        if (task.status === 'completed') {
+          setModal({
+            show: true,
+            type: 'success',
+            title: 'Import Successful',
+            message: `${task.result.message}. Linked ${task.result.linked_tracks} tracks and added ${task.result.imported_tracks} new songs.`
+          });
+          setImporting(false);
+          handlePageChange(1);
+          return;
+        }
+
+        if (task.status === 'failed') {
+          setModal({
+            show: true,
+            type: 'error',
+            title: 'Import Failed',
+            message: task.error || 'Something went wrong during the background process.'
+          });
+          setImporting(false);
+          return;
+        }
+
+        // Show live progress for running/pending tasks
+        setModal({
+          show: true,
+          type: 'info',
+          title: 'Import in Progress',
+          message: task.message + (task.total ? ` (${task.progress} / ${task.total})` : '')
+        });
+
+        // Continue polling
+        setTimeout(poll, 1500);
+      } catch (err) {
+        console.error('Polling error:', err);
+        setImporting(false);
+      }
+    };
+    poll();
+  }, [token, handlePageChange]);
+
   const handleImport = async () => {
     if (!token || !selectedPlaylistId) return;
 
     setImporting(true);
+    setModal({
+      show: true,
+      type: 'info',
+      title: 'Import Started',
+      message: 'Your playlist is being processed in the background. Please wait...'
+    });
+
     try {
       const res = await fetch(`/api/integrations/youtube/import-playlist/${selectedPlaylistId}`, {
         method: 'POST',
@@ -213,25 +273,19 @@ const Library = () => {
       });
 
       const data = await res.json();
-      if (res.ok) {
-        setModal({
-          show: true,
-          type: 'success',
-          title: 'Import Successful',
-          message: `${data.message}. Linked ${data.linked_tracks} tracks and added ${data.imported_tracks} new songs.`
-        });
-        handlePageChange(1);
+      if (res.ok && data.task_id) {
+        pollTask(data.task_id);
       } else {
+        setImporting(false);
         setModal({
           show: true,
           type: 'error',
           title: 'Import Failed',
-          message: data.detail || 'Something went wrong.'
+          message: data.detail || 'Failed to start background import.'
         });
       }
     } catch (err) {
       console.error(err);
-    } finally {
       setImporting(false);
     }
   };

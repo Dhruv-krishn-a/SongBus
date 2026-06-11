@@ -1,4 +1,3 @@
-import os
 from ytmusicapi import YTMusic
 
 class YTMusicService:
@@ -13,7 +12,7 @@ class YTMusicService:
             # For simplicity, if headers_auth is a path to a json file:
             try:
                 self.client = YTMusic(headers_auth)
-            except Exception as e:
+            except Exception:
                 # Fallback to unauthenticated client
                 self.client = YTMusic()
         else:
@@ -26,7 +25,7 @@ class YTMusicService:
         """
         try:
             return self.client.get_liked_songs(limit=limit)
-        except Exception as e:
+        except Exception:
             # Handle unauthenticated state appropriately
             return []
 
@@ -36,7 +35,7 @@ class YTMusicService:
         """
         try:
             return self.client.get_library_playlists()
-        except Exception as e:
+        except Exception:
             return []
             
     def get_playlist_tracks(self, playlist_id: str):
@@ -45,5 +44,5 @@ class YTMusicService:
         """
         try:
             return self.client.get_playlist(playlistId=playlist_id)
-        except Exception as e:
+        except Exception:
             return None

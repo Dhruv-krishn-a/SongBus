@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { 
-  Music, Mic2, Disc, PlayCircle, BarChart3, 
+  Music, Mic2, Disc,  
   TrendingUp, Sparkles, Brain, Compass, 
   Layers, Gauge, Loader2
 } from 'lucide-react';

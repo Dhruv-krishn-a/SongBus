@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { 
   Sparkles, Send, CheckCircle2, AlertCircle, 
-  ExternalLink, Loader2, Music2, Info, X 
+  ExternalLink, Loader2, Music2, Info,  
 } from 'lucide-react';
 
 type ModalConfig = {
