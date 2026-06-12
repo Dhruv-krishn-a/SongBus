@@ -753,21 +753,12 @@ async def _enrich_library_task_async(task_id: str, user_id: int, include_lyrics:
                 tasks.update_task(task_id, progress=processed_count, message=f"Building Bridge ({processed_count}/{total_tracks})...")
                 db.commit()
 
-        tasks.update_task(task_id, status="completed", message=f"Bridge build complete! Updated {enriched_count} tracks.", progress=total_tracks)
-
-    except Exception as exc:
-        db.rollback()
-        tasks.update_task(task_id, status="failed", error=str(exc))
-    finally:
-        db.close()
-
-        result = {"message": f"Successfully enriched {enriched_count} tracks in this run."}
         tasks.update_task(
-            task_id,
-            status="completed",
-            message="Batch Enrichment complete!",
+            task_id, 
+            status="completed", 
+            message=f"Bridge build complete! Updated {enriched_count} data points.", 
             progress=total_tracks,
-            result=result,
+            result={"enriched_count": enriched_count}
         )
 
     except Exception as exc:
