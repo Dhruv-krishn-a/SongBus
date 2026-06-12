@@ -1,6 +1,4 @@
 import traceback
-import json
-import os
 from app.core.database import SessionLocal
 from app.models import schema
 from app.api.youtube import request_with_refresh, fetch_user_playlists_response, fetch_playlist_items_response

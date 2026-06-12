@@ -1,9 +1,10 @@
 import { useEffect, useState, useCallback } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { 
-  Wand2, X, Check, Search, Filter, ChevronLeft, ChevronRight, 
+  Wand2, X, Check, Search, ChevronLeft, ChevronRight, 
   Music2, Clock, Trash2, ArrowUp, ArrowDown, 
-  AlertCircle, Info, CheckCircle2, RefreshCw, Loader2, Brain
+  AlertCircle, Info, CheckCircle2, RefreshCw, Loader2, Brain,
+  Activity, Zap, Mic, Globe
 } from 'lucide-react';
 
 const PAGE_SIZE = 12;
@@ -19,6 +20,13 @@ type Track = {
   mood?: string | null;
   source?: string | null;
   created_at?: string | null;
+  // Deep Data
+  bpm?: number | null;
+  energy?: number | null;
+  danceability?: number | null;
+  valence?: number | null;
+  lyrics?: string | null;
+  spotify_uri?: string | null;
 };
 
 type YouTubePlaylist = {
@@ -67,8 +75,10 @@ const Library = () => {
   const { token } = useAuth();
   const [tracks, setTracks] = useState<Track[]>([]);
   const [loading, setLoading] = useState(true);
+  const [activeTab, setActiveTab] = useState<'all' | 'youtube' | 'spotify'>('all');
+  
   const [importing, setImporting] = useState(false);
-  const [status, setStatus] = useState({ youtube_connected: false });
+  const [status, setStatus] = useState({ spotify_connected: false, youtube_connected: false });
   const [page, setPage] = useState(1);
   const [total, setTotal] = useState(0);
   const [totalPages, setTotalPages] = useState(0);
@@ -81,7 +91,6 @@ const Library = () => {
   const [moodFilter, setMoodFilter] = useState('');
   const [sortBy, setSortBy] = useState('created_at');
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc');
-  const [showMobileFilters, setShowMobileFilters] = useState(false);
 
   // Bulk Normalize states
   const [showBatchModal, setShowBatchModal] = useState(false);
@@ -89,6 +98,9 @@ const Library = () => {
   const [selectedForBatch, setSelectedForBatch] = useState<Set<number>>(new Set());
   const [isBatchProcessing, setIsBatchProcessing] = useState(false);
   const [isClassifyingAi, setIsClassifyingAi] = useState(false);
+
+  // Track Details Modal
+  const [selectedTrack, setSelectedTrack] = useState<Track | null>(null);
 
   // Global Feedback Modal
   const [modal, setModal] = useState<ModalConfig>({
@@ -173,6 +185,10 @@ const Library = () => {
     if (artistFilter) url += `&artist=${encodeURIComponent(artistFilter)}`;
     if (genreFilter) url += `&genre=${encodeURIComponent(genreFilter)}`;
     if (moodFilter) url += `&mood=${encodeURIComponent(moodFilter)}`;
+    
+    // Platform Tab Filtering
+    if (activeTab === 'youtube') url += `&source=youtube`;
+    if (activeTab === 'spotify') url += `&source=spotify`;
 
     fetch(url, {
       headers: { Authorization: `Bearer ${token}` }
@@ -189,7 +205,7 @@ const Library = () => {
         clearTimeout(timeoutId);
         setLoading(false);
       });
-  }, [token, page, debouncedSearch, artistFilter, genreFilter, moodFilter, sortBy, sortOrder]);
+  }, [token, page, debouncedSearch, artistFilter, genreFilter, moodFilter, sortBy, sortOrder, activeTab]);
 
   useEffect(() => {
     fetchStatus();
@@ -197,7 +213,7 @@ const Library = () => {
 
   useEffect(() => {
     fetchTracks(1);
-  }, [token, debouncedSearch, artistFilter, genreFilter, moodFilter, sortBy, sortOrder]);
+  }, [token, debouncedSearch, artistFilter, genreFilter, moodFilter, sortBy, sortOrder, activeTab]);
 
   const handlePageChange = (newPage: number) => {
     setPage(newPage);
@@ -220,8 +236,8 @@ const Library = () => {
           setModal({
             show: true,
             type: 'success',
-            title: 'Import Successful',
-            message: `${task.result.message}. Linked ${task.result.linked_tracks} tracks and added ${task.result.imported_tracks} new songs.`
+            title: 'Sync Complete',
+            message: `${task.result?.message || 'Sync finished.'}`
           });
           setImporting(false);
           handlePageChange(1);
@@ -232,22 +248,20 @@ const Library = () => {
           setModal({
             show: true,
             type: 'error',
-            title: 'Import Failed',
-            message: task.error || 'Something went wrong during the background process.'
+            title: 'Sync Failed',
+            message: task.error || 'Something went wrong.'
           });
           setImporting(false);
           return;
         }
 
-        // Show live progress for running/pending tasks
         setModal({
           show: true,
           type: 'info',
-          title: 'Import in Progress',
+          title: task.name + ' in Progress',
           message: task.message + (task.total ? ` (${task.progress} / ${task.total})` : '')
         });
 
-        // Continue polling
         setTimeout(poll, 1500);
       } catch (err) {
         console.error('Polling error:', err);
@@ -257,56 +271,42 @@ const Library = () => {
     poll();
   }, [token, handlePageChange]);
 
-  const handleImport = async () => {
+  const handleYouTubeImport = async () => {
     if (!token || !selectedPlaylistId) return;
 
     setImporting(true);
-    setModal({
-      show: true,
-      type: 'info',
-      title: 'Import Started',
-      message: 'Your playlist is being processed in the background. Please wait...'
-    });
+    setModal({ show: true, type: 'info', title: 'Import Started', message: 'Connecting to YouTube...' });
 
     try {
       const res = await fetch(`/api/integrations/youtube/import-playlist/${selectedPlaylistId}`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${token}` }
       });
-
       const data = await res.json();
-      if (res.ok && data.task_id) {
-        pollTask(data.task_id);
-      } else {
-        setImporting(false);
-        setModal({
-          show: true,
-          type: 'error',
-          title: 'Import Failed',
-          message: data.detail || 'Failed to start background import.'
-        });
-      }
-    } catch (err) {
-      console.error(err);
+      if (res.ok && data.task_id) pollTask(data.task_id);
+      else throw new Error(data.detail || 'Failed');
+    } catch (err: any) {
       setImporting(false);
+      setModal({ show: true, type: 'error', title: 'Error', message: err.message });
     }
   };
 
-  const handleNormalize = async (trackId: number) => {
+  const handleSpotifySync = async () => {
     if (!token) return;
+    setImporting(true);
+    setModal({ show: true, type: 'info', title: 'Spotify Sync Started', message: 'Accessing your Liked Songs...' });
 
     try {
-      const res = await fetch(`/api/music/normalize/${trackId}`, {
+      const res = await fetch('/api/music/sync-spotify', {
         method: 'POST',
         headers: { Authorization: `Bearer ${token}` }
       });
-
-      if (res.ok) {
-        const updatedTrack = await res.json();
-        setTracks(prev => prev.map(t => t.id === trackId ? updatedTrack : t));
-      }
-    } catch (err) {
-      console.error(err);
+      const data = await res.json();
+      if (res.ok && data.task_id) pollTask(data.task_id);
+      else throw new Error(data.detail || 'Failed');
+    } catch (err: any) {
+      setImporting(false);
+      setModal({ show: true, type: 'error', title: 'Error', message: err.message });
     }
   };
 
@@ -315,56 +315,81 @@ const Library = () => {
       show: true,
       type: 'confirm',
       title: 'Remove Track',
-      message: `Are you sure you want to remove "${title}" from your library?`,
-      confirmText: 'Remove Song',
+      message: `Are you sure you want to remove "${title}"?`,
+      confirmText: 'Remove',
       onConfirm: () => handleDelete(trackId)
     });
   };
 
   const handleDelete = async (trackId: number) => {
     if (!token) return;
-
     try {
       const res = await fetch(`/api/music/tracks/${trackId}`, {
         method: 'DELETE',
         headers: { Authorization: `Bearer ${token}` }
       });
-
       if (res.ok) {
         setTracks(prev => prev.filter(t => t.id !== trackId));
         setTotal(prev => prev - 1);
         setModal({ show: false, type: 'info', title: '', message: '' });
       }
-    } catch (err) {
-      console.error(err);
-    }
+    } catch (err) { console.error(err); }
   };
 
   const toggleSort = (field: string) => {
-    if (sortBy === field) {
-      setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc');
-    } else {
-      setSortBy(field);
-      setSortOrder('asc');
-    }
+    if (sortBy === field) setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc');
+    else { setSortBy(field); setSortOrder('asc'); }
+  };
+
+  const pollClassifyTask = useCallback(async (taskId: string) => {
+    const poll = async () => {
+      try {
+        const res = await fetch(`/api/tasks/${taskId}`, {
+          headers: { Authorization: `Bearer ${token}` }
+        });
+        if (!res.ok) { setIsClassifyingAi(false); return; }
+        const task = await res.json();
+        if (task.status === 'completed') {
+          setModal({ show: true, type: 'success', title: 'Complete', message: task.result?.message || 'Success.' });
+          setIsClassifyingAi(false);
+          handlePageChange(1);
+          return;
+        }
+        if (task.status === 'failed') {
+          setModal({ show: true, type: 'error', title: 'Failed', message: task.error || 'Error.' });
+          setIsClassifyingAi(false);
+          return;
+        }
+        setModal({ show: true, type: 'info', title: 'Analyzing...', message: task.message + (task.total ? ` (${task.progress} / ${task.total})` : '') });
+        setTimeout(poll, 1500);
+      } catch (err) { setIsClassifyingAi(false); }
+    };
+    poll();
+  }, [token, handlePageChange]);
+
+  const handleClassifyAi = async () => {
+    if (!token) return;
+    setIsClassifyingAi(true);
+    setModal({ show: true, type: 'info', title: 'AI classification', message: 'Gemini is working in the background...' });
+    try {
+      const res = await fetch('/api/music/classify-all', { method: 'POST', headers: { Authorization: `Bearer ${token}` } });
+      const data = await res.json();
+      if (res.ok && data.task_id) pollClassifyTask(data.task_id);
+      else setIsClassifyingAi(false);
+    } catch (err) { setIsClassifyingAi(false); }
   };
 
   const startBatchNormalize = async () => {
     if (!token) return;
     setLoading(true);
     try {
-      const res = await fetch('/api/music/normalize/preview', {
-        headers: { Authorization: `Bearer ${token}` }
-      });
+      const res = await fetch('/api/music/normalize/preview', { headers: { Authorization: `Bearer ${token}` } });
       const data = await res.json();
       setPreviewData(data.preview || []);
       setSelectedForBatch(new Set((data.preview || []).map((p: NormalizePreview) => p.id)));
       setShowBatchModal(true);
-    } catch (err) {
-      console.error(err);
-    } finally {
-      setLoading(false);
-    }
+    } catch (err) { console.error(err); }
+    finally { setLoading(false); }
   };
 
   const handleBatchCommit = async () => {
@@ -373,27 +398,12 @@ const Library = () => {
     try {
       const res = await fetch('/api/music/normalize/batch', {
         method: 'POST',
-        headers: { 
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}` 
-        },
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify({ track_ids: Array.from(selectedForBatch) })
       });
-      if (res.ok) {
-        setShowBatchModal(false);
-        setModal({
-          show: true,
-          type: 'success',
-          title: 'Batch Complete',
-          message: `Successfully normalized ${selectedForBatch.size} tracks.`
-        });
-        handlePageChange(1);
-      }
-    } catch (err) {
-      console.error(err);
-    } finally {
-      setIsBatchProcessing(false);
-    }
+      if (res.ok) { setShowBatchModal(false); handlePageChange(page); }
+    } catch (err) { console.error(err); }
+    finally { setIsBatchProcessing(false); }
   };
 
   const toggleBatchTrack = (id: number) => {
@@ -403,58 +413,7 @@ const Library = () => {
     setSelectedForBatch(next);
   };
 
-  const handleClassifyAi = async () => {
-    if (!token) return;
-    setIsClassifyingAi(true);
-    setModal({
-      show: true,
-      type: 'info',
-      title: 'AI Classification Started',
-      message: 'Gemini is analyzing your library. This may take a minute...'
-    });
-
-    try {
-      const res = await fetch('/api/music/classify-all', {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${token}` }
-      });
-      const data = await res.json();
-      
-      if (res.ok) {
-        setModal({
-          show: true,
-          type: 'success',
-          title: 'Classification Complete',
-          message: data.message
-        });
-        handlePageChange(1); // Refresh tracks to show new genres/moods
-      } else {
-        setModal({
-          show: true,
-          type: 'error',
-          title: 'Classification Failed',
-          message: data.detail || 'An error occurred during AI analysis.'
-        });
-      }
-    } catch (err: unknown) {
-      console.error(err);
-      setModal({
-        show: true,
-        type: 'error',
-        title: 'Classification Failed',
-        message: err instanceof Error ? err.message : 'Unknown error'
-      });
-    } finally {
-      setIsClassifyingAi(false);
-    }
-  };
-
-  const clearFilters = () => {
-    setSearch('');
-    setArtistFilter('');
-    setGenreFilter('');
-    setMoodFilter('');
-  };
+  const clearFilters = () => { setSearch(''); setArtistFilter(''); setGenreFilter(''); setMoodFilter(''); };
 
   const renderSortIndicator = (field: string) => {
     if (sortBy !== field) return null;
@@ -463,297 +422,207 @@ const Library = () => {
 
   return (
     <div className="max-w-7xl mx-auto px-1 sm:px-2 md:px-0 space-y-6 md:space-y-8 animate-in fade-in duration-500 pb-20">
+      {/* Platform Switcher Tabs */}
+      <div className="flex p-1 bg-gray-200/50 rounded-2xl w-fit">
+        <button onClick={() => setActiveTab('all')} className={`px-6 py-2 rounded-xl text-xs font-black uppercase tracking-widest transition-all ${activeTab === 'all' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}>
+          Central Hub
+        </button>
+        <button onClick={() => setActiveTab('youtube')} className={`px-6 py-2 rounded-xl text-xs font-black uppercase tracking-widest transition-all flex items-center gap-2 ${activeTab === 'youtube' ? 'bg-white text-red-600 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}>
+          <Music2 className="w-3 h-3" /> YouTube Music
+        </button>
+        <button onClick={() => setActiveTab('spotify')} className={`px-6 py-2 rounded-xl text-xs font-black uppercase tracking-widest transition-all flex items-center gap-2 ${activeTab === 'spotify' ? 'bg-white text-green-600 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}>
+          <Globe className="w-3 h-3" /> Spotify
+        </button>
+      </div>
+
       {/* Page Header */}
       <header className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 md:gap-6">
-        <div className="text-center lg:text-left">
-          <h1 className="text-2xl md:text-3xl font-black text-gray-900 tracking-tight">Music Library</h1>
-          <p className="text-sm md:text-base text-gray-500 font-medium">Explore and manage your {total} tracks.</p>
+        <div>
+          <h1 className="text-3xl font-black text-gray-900 tracking-tight">
+            {activeTab === 'all' ? 'Golden Library' : activeTab === 'youtube' ? 'YT Music Collection' : 'Spotify Library'}
+          </h1>
+          <p className="text-sm md:text-base text-gray-500 font-medium">Managing {total} tracks from {activeTab}.</p>
         </div>
         
-        <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
-          <button
-            onClick={startBatchNormalize}
-            className="flex-1 sm:flex-none flex items-center justify-center gap-2 bg-white text-gray-900 px-5 py-3 rounded-2xl border border-gray-200 shadow-sm hover:shadow-md hover:border-primary/30 transition-all font-bold text-sm group"
-          >
-            <Wand2 className="w-4 h-4 text-primary" />
-            Normalize All
-          </button>
-          
-          <button
-            onClick={handleClassifyAi}
-            disabled={isClassifyingAi}
-            className="flex-1 sm:flex-none flex items-center justify-center gap-2 bg-gray-900 text-white px-5 py-3 rounded-2xl shadow-xl shadow-gray-900/10 hover:bg-gray-800 transition-all font-bold text-sm group disabled:opacity-50"
-          >
-            {isClassifyingAi ? <Loader2 className="w-4 h-4 animate-spin" /> : <Brain className="w-4 h-4 text-primary" />}
-            {isClassifyingAi ? 'Classifying...' : 'Classify using AI'}
-          </button>
+        <div className="flex flex-wrap items-center gap-3">
+          {activeTab === 'all' && (
+            <>
+              <button onClick={startBatchNormalize} className="flex-1 lg:flex-none flex items-center justify-center gap-2 bg-white text-gray-900 px-5 py-3 rounded-2xl border border-gray-200 shadow-sm hover:shadow-md hover:border-primary/30 transition-all font-bold text-sm group">
+                <Wand2 className="w-4 h-4 text-primary" /> Normalize All
+              </button>
+              <button onClick={handleClassifyAi} disabled={isClassifyingAi} className="flex-1 lg:flex-none flex items-center justify-center gap-2 bg-gray-900 text-white px-5 py-3 rounded-2xl shadow-xl shadow-gray-900/10 hover:bg-gray-800 transition-all font-bold text-sm group disabled:opacity-50">
+                {isClassifyingAi ? <Loader2 className="w-4 h-4 animate-spin" /> : <Brain className="w-4 h-4 text-primary" />} Classify
+              </button>
+            </>
+          )}
 
-          {status.youtube_connected && (
-            <div className="flex-1 sm:flex-none flex items-stretch gap-2 bg-white p-1.5 rounded-2xl border border-gray-200 shadow-sm max-w-full sm:max-w-md lg:max-w-lg">
+          {activeTab === 'youtube' && status.youtube_connected && (
+            <div className="flex-1 lg:flex-none flex items-stretch gap-2 bg-white p-1.5 rounded-2xl border border-gray-200 shadow-sm min-w-[300px]">
               {youtubePlaylists.length === 0 ? (
-                <button
-                  onClick={fetchYouTubePlaylists}
-                  disabled={playlistsLoading}
-                  className="flex-1 flex items-center justify-center gap-2 py-2 px-4 text-sm font-black text-gray-400 hover:text-primary transition-colors disabled:opacity-50 whitespace-nowrap"
-                >
-                  {playlistsLoading ? (
-                    <Loader2 className="w-4 h-4 animate-spin text-primary" />
-                  ) : (
-                    <RefreshCw className="w-4 h-4" />
-                  )}
-                  {playlistsLoading ? 'Scanning...' : 'Fetch Playlists'}
-                </button>
+                <button onClick={fetchYouTubePlaylists} disabled={playlistsLoading} className="flex-1 flex items-center justify-center gap-2 py-2 text-sm font-black text-gray-400 hover:text-primary transition-colors"><RefreshCw className={`w-4 h-4 ${playlistsLoading ? 'animate-spin' : ''}`} /> Fetch Playlists</button>
               ) : (
                 <div className="flex items-center gap-1 w-full min-w-0">
                   <div className="flex-1 flex items-center px-2 min-w-0 bg-gray-50 rounded-xl h-10">
                     <Music2 className="w-4 h-4 text-primary mr-2 flex-shrink-0" />
-                    <select
-                      value={selectedPlaylistId}
-                      onChange={(e) => handlePlaylistChange(e.target.value)}
-                      disabled={importing}
-                      className="bg-transparent text-[13px] font-bold focus:outline-none w-full truncate cursor-pointer appearance-none"
-                    >
-                      {youtubePlaylists.map((p) => (
-                        <option key={p.id} value={p.id}>{p.title} ({p.track_count})</option>
-                      ))}
+                    <select value={selectedPlaylistId} onChange={(e) => handlePlaylistChange(e.target.value)} className="bg-transparent text-[13px] font-bold focus:outline-none w-full truncate appearance-none">
+                      {youtubePlaylists.map((p) => <option key={p.id} value={p.id}>{p.title} ({p.track_count})</option>)}
                     </select>
                   </div>
-                  <button
-                    onClick={handleImport}
-                    disabled={importing || !selectedPlaylistId}
-                    className="bg-gray-900 text-white px-5 h-10 rounded-xl text-[11px] font-black uppercase tracking-wider hover:bg-gray-800 transition disabled:opacity-50 whitespace-nowrap"
-                  >
-                    {importing ? '...' : 'Import'}
-                  </button>
-                  <button
-                    onClick={fetchYouTubePlaylists}
-                    disabled={playlistsLoading || importing}
-                    className="p-2.5 text-gray-400 hover:text-primary transition-colors rounded-xl bg-gray-50"
-                    title="Refresh List"
-                  >
-                    <RefreshCw className={`w-4 h-4 ${playlistsLoading ? 'animate-spin text-primary' : ''}`} />
-                  </button>
+                  <button onClick={handleYouTubeImport} className="bg-gray-900 text-white px-5 h-10 rounded-xl text-[11px] font-black uppercase tracking-wider hover:bg-gray-800">Scan</button>
+                  <button onClick={fetchYouTubePlaylists} className="p-2.5 text-gray-400 hover:text-primary rounded-xl bg-gray-50"><RefreshCw className={`w-4 h-4 ${playlistsLoading ? 'animate-spin' : ''}`} /></button>
                 </div>
               )}
             </div>
+          )}
+
+          {activeTab === 'spotify' && status.spotify_connected && (
+             <button onClick={handleSpotifySync} disabled={importing} className="flex-1 lg:flex-none flex items-center justify-center gap-2 bg-green-600 text-white px-8 py-3 rounded-2xl shadow-xl shadow-green-600/20 hover:bg-green-700 transition-all font-bold text-sm">
+                <Globe className="w-4 h-4" /> Sync Liked Songs
+             </button>
           )}
         </div>
       </header>
 
       {/* Control Bar */}
-      <div className="sticky top-[72px] lg:top-4 z-20 bg-white/90 backdrop-blur-xl border border-gray-100 rounded-2xl md:rounded-3xl shadow-lg shadow-gray-200/20 p-2 mx-1 sm:mx-0">
+      <div className="sticky top-[72px] lg:top-4 z-20 bg-white/90 backdrop-blur-xl border border-gray-100 rounded-3xl shadow-lg shadow-gray-200/20 p-2">
         <div className="flex flex-col md:flex-row items-stretch md:items-center gap-2">
           <div className="flex-1 relative group">
             <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 group-focus-within:text-primary transition-colors" />
-            <input
-              type="text"
-              placeholder="Search library..."
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              className="w-full bg-gray-50/50 border-none rounded-xl md:rounded-2xl pl-11 pr-4 py-3 text-sm font-medium focus:ring-2 focus:ring-primary/10 outline-none transition-all"
-            />
+            <input type="text" placeholder="Search title, artist..." value={search} onChange={(e) => setSearch(e.target.value)} className="w-full bg-gray-50/50 border-none rounded-2xl pl-11 pr-4 py-3 text-sm font-medium focus:ring-2 focus:ring-primary/10 outline-none transition-all" />
           </div>
-          
-          <button 
-            onClick={() => setShowMobileFilters(!showMobileFilters)}
-            className="md:hidden flex items-center justify-center gap-2 px-4 py-3 bg-gray-50 rounded-xl text-sm font-bold text-gray-600"
-          >
-            <Filter className="w-4 h-4" />
-            Filters { (artistFilter || genreFilter || moodFilter) && '•' }
-          </button>
-
-          <div className={`${showMobileFilters ? 'flex' : 'hidden'} md:flex flex-col md:flex-row items-stretch gap-2`}>
-            <input
-              type="text"
-              placeholder="Artist..."
-              value={artistFilter}
-              onChange={(e) => setArtistFilter(e.target.value)}
-              className="md:w-36 bg-gray-50/50 border-none rounded-xl md:rounded-2xl px-4 py-3 text-sm font-medium focus:ring-2 focus:ring-primary/10 outline-none"
-            />
-            <select
-              value={genreFilter}
-              onChange={(e) => setGenreFilter(e.target.value)}
-              className="md:w-36 bg-gray-50/50 border-none rounded-xl md:rounded-2xl px-4 py-3 text-sm font-medium focus:ring-2 focus:ring-primary/10 outline-none appearance-none"
-            >
+          <div className="flex items-center gap-2 overflow-x-auto no-scrollbar">
+            <input type="text" placeholder="Artist..." value={artistFilter} onChange={(e) => setArtistFilter(e.target.value)} className="w-36 bg-gray-50/50 border-none rounded-2xl px-4 py-3 text-sm font-medium focus:ring-2 focus:ring-primary/10 outline-none" />
+            <select value={genreFilter} onChange={(e) => setGenreFilter(e.target.value)} className="w-36 bg-gray-50/50 border-none rounded-2xl px-4 py-3 text-sm font-medium focus:ring-2 focus:ring-primary/10 outline-none appearance-none">
               <option value="">All Genres</option>
-              <option value="Bollywood">Bollywood</option>
-              <option value="Electronic/Remix">Electronic</option>
-              <option value="Rock/Metal">Rock</option>
               <option value="Pop">Pop</option>
-              <option value="Hip-Hop/Rap">Hip-Hop</option>
+              <option value="Bollywood">Bollywood</option>
+              <option value="Rock">Rock</option>
+              <option value="Indie">Indie</option>
             </select>
-            {(search || artistFilter || genreFilter || moodFilter) && (
-              <button onClick={clearFilters} className="px-4 py-2 text-sm font-bold text-red-500 hover:bg-red-50 rounded-xl transition-colors">
-                Clear
-              </button>
-            )}
+            {(search || artistFilter || genreFilter || moodFilter) && <button onClick={clearFilters} className="px-4 py-2 text-sm font-bold text-red-500 hover:bg-red-50 rounded-xl">Clear</button>}
           </div>
         </div>
       </div>
 
-      {/* Responsive View Container */}
-      <div className="w-full">
-        {/* Desktop Table View (lg+) */}
-        <div className="hidden lg:block bg-white rounded-[32px] border border-gray-100 shadow-xl shadow-gray-200/40 overflow-hidden">
-          <table className="w-full text-left">
-            <thead>
-              <tr className="border-b border-gray-50 bg-gray-50/30 text-[10px] md:text-[11px] font-black text-gray-400 uppercase tracking-widest">
-                <th onClick={() => toggleSort('title')} className="pl-8 pr-4 py-5 cursor-pointer hover:text-primary transition-colors select-none">
-                  <div className="flex items-center">Track {renderSortIndicator('title')}</div>
-                </th>
-                <th onClick={() => toggleSort('album')} className="px-4 py-5 cursor-pointer hover:text-primary transition-colors select-none">
-                  <div className="flex items-center">Album {renderSortIndicator('album')}</div>
-                </th>
-                <th onClick={() => toggleSort('genre')} className="px-4 py-5 cursor-pointer hover:text-primary transition-colors select-none">
-                  <div className="flex items-center">Classification {renderSortIndicator('genre')}</div>
-                </th>
-                <th className="px-4 py-5 text-center"><Clock className="w-3.5 h-3.5 mx-auto" /></th>
-                <th onClick={() => toggleSort('created_at')} className="pl-4 pr-8 py-5 cursor-pointer hover:text-primary transition-colors select-none text-right">
-                  <div className="flex items-center justify-end">Added {renderSortIndicator('created_at')}</div>
-                </th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-50">
-              {loading ? (
-                [...Array(6)].map((_, i) => (
-                  <tr key={i} className="animate-pulse">
-                    <td colSpan={5} className="px-8 py-6">
-                      <div className="flex gap-4"><div className="w-12 h-12 bg-gray-100 rounded-xl" /><div className="flex-1 space-y-2"><div className="h-4 bg-gray-100 rounded w-1/4" /><div className="h-3 bg-gray-50 rounded w-1/6" /></div></div>
-                    </td>
-                  </tr>
-                ))
-              ) : tracks.length === 0 ? (
-                <tr>
-                  <td colSpan={5} className="px-8 py-20 text-center text-gray-400">
-                    <Music2 className="w-12 h-12 mx-auto mb-4 opacity-20" />
-                    <p className="font-bold text-gray-500">No tracks found in your library.</p>
-                  </td>
-                </tr>
-              ) : tracks.map((track) => (
-                <tr key={track.id} className="group hover:bg-primary/[0.02] transition-all">
-                  <td className="pl-8 pr-4 py-4">
-                    <div className="flex items-center gap-4">
-                      <div className="relative w-12 h-12 md:w-14 md:h-14 rounded-2xl overflow-hidden bg-gray-100 flex-shrink-0 shadow-sm">
-                        {track.thumbnail_url ? (
-                          <img src={track.thumbnail_url} alt="" className="w-full h-full object-cover" />
-                        ) : (
-                          <div className="w-full h-full flex items-center justify-center text-gray-300"><Music2 className="w-6 h-6" /></div>
-                        )}
+      {/* Table Hub */}
+      <div className="bg-white rounded-[32px] border border-gray-100 shadow-xl shadow-gray-200/40 overflow-hidden">
+        <table className="w-full text-left">
+          <thead>
+            <tr className="border-b border-gray-50 bg-gray-50/30 text-[11px] font-black text-gray-400 uppercase tracking-widest">
+              <th onClick={() => toggleSort('title')} className="pl-8 pr-4 py-5 cursor-pointer hover:text-primary select-none"><div className="flex items-center">Track Info {renderSortIndicator('title')}</div></th>
+              <th className="px-4 py-5">Source</th>
+              <th onClick={() => toggleSort('genre')} className="px-4 py-5 cursor-pointer hover:text-primary select-none"><div className="flex items-center">Insights {renderSortIndicator('genre')}</div></th>
+              <th className="px-4 py-5 text-center"><Clock className="w-3.5 h-3.5 mx-auto" /></th>
+              <th onClick={() => toggleSort('created_at')} className="pl-4 pr-8 py-5 cursor-pointer hover:text-primary select-none text-right"><div className="flex items-center justify-end">Added {renderSortIndicator('created_at')}</div></th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-gray-50">
+            {loading ? [...Array(6)].map((_, i) => <tr key={i} className="animate-pulse"><td colSpan={5} className="px-8 py-6"><div className="flex gap-4"><div className="w-12 h-12 bg-gray-100 rounded-xl" /><div className="flex-1 space-y-2"><div className="h-4 bg-gray-100 rounded w-1/4" /><div className="h-3 bg-gray-50 rounded w-1/6" /></div></div></td></tr>) : tracks.length === 0 ? <tr><td colSpan={5} className="px-8 py-20 text-center"><p className="font-bold text-gray-400">Library Empty</p></td></tr> : tracks.map((track) => (
+              <tr key={track.id} className="group hover:bg-primary/[0.02] transition-all cursor-pointer" onClick={() => setSelectedTrack(track)}>
+                <td className="pl-8 pr-4 py-4">
+                  <div className="flex items-center gap-4">
+                    <div className="relative w-14 h-14 rounded-2xl overflow-hidden bg-gray-100 shadow-sm group-hover:scale-105 transition-transform duration-300">
+                      <img src={track.thumbnail_url || ''} alt="" className="w-full h-full object-cover" />
+                      <div className="absolute inset-0 bg-black/40 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
+                        <Loader2 className="w-5 h-5 text-white animate-spin opacity-40" />
                       </div>
-                      <div className="min-w-0 flex-1">
-                        <div className="flex items-center gap-2">
-                          <p className="font-bold text-gray-900 truncate leading-tight">{track.title}</p>
-                          <div className="flex items-center opacity-0 group-hover:opacity-100 transition-all">
-                            <button onClick={() => handleNormalize(track.id)} className="p-1.5 text-primary bg-primary/5 hover:bg-primary hover:text-white rounded-lg transition-all mr-1"><Wand2 className="w-3 h-3.5" /></button>
-                            <button onClick={() => confirmDelete(track.id, track.title)} className="p-1.5 text-red-500 bg-red-50 hover:bg-red-500 hover:text-white rounded-lg transition-all"><Trash2 className="w-3 h-3.5" /></button>
-                          </div>
+                    </div>
+                    <div className="min-w-0">
+                      <p className="font-black text-gray-900 truncate leading-tight">{track.title}</p>
+                      <p className="text-xs font-bold text-gray-400 truncate">{track.artist}</p>
+                    </div>
+                  </div>
+                </td>
+                <td className="px-4 py-4">
+                  <div className="flex gap-2">
+                    {track.source === 'youtube' ? <div className="w-8 h-8 bg-red-50 rounded-lg flex items-center justify-center text-red-500 shadow-sm border border-red-100"><Music2 className="w-4 h-4" /></div> : <div className="w-8 h-8 bg-green-50 rounded-lg flex items-center justify-center text-green-500 shadow-sm border border-green-100"><Globe className="w-4 h-4" /></div>}
+                    {track.spotify_uri && track.source === 'youtube' && <div className="w-8 h-8 bg-blue-50 rounded-lg flex items-center justify-center text-blue-500 shadow-sm border border-blue-100" title="Matched to Spotify"><Zap className="w-4 h-4" /></div>}
+                  </div>
+                </td>
+                <td className="px-4 py-4">
+                   <div className="flex items-center gap-3">
+                      <div className="flex flex-col gap-0.5">
+                        <span className="text-[10px] font-black text-primary uppercase tracking-widest">{track.genre || 'MIX'}</span>
+                        <div className="w-16 h-1 bg-gray-100 rounded-full overflow-hidden">
+                           <div className="bg-primary h-full transition-all" style={{ width: `${(track.energy || 0.5) * 100}%` }} />
                         </div>
-                        <button onClick={() => setArtistFilter(track.artist)} className="text-xs md:text-sm font-bold text-gray-400 hover:text-primary transition-colors truncate block">{track.artist}</button>
                       </div>
-                    </div>
-                  </td>
-                  <td className="px-4 py-4 text-sm font-semibold text-gray-500 italic max-w-[160px] truncate">{track.album || '—'}</td>
-                  <td className="px-4 py-4">
-                    <div className="flex gap-2">
-                      <span className="px-2 py-0.5 rounded-lg bg-blue-50 text-blue-600 text-[10px] font-black uppercase tracking-wider">{track.genre || 'VARIOUS'}</span>
-                      <span className={`px-2 py-0.5 rounded-lg text-[10px] font-black uppercase tracking-wider ${track.mood === 'Energetic/Party' ? 'bg-orange-50 text-orange-600' : 'bg-green-50 text-green-600'}`}>{track.mood || 'NEUTRAL'}</span>
-                    </div>
-                  </td>
-                  <td className="px-4 py-4 text-center text-sm font-black text-gray-400 tabular-nums">{formatDuration(track.duration_ms)}</td>
-                  <td className="pl-4 pr-8 py-4 text-right">
-                    <span className="text-xs font-bold text-gray-400 whitespace-nowrap">{formatDate(track.created_at)}</span>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+                      {track.lyrics && <span title="Lyrics available"><Mic className="w-4 h-4 text-purple-400" /></span>}
+                   </div>
+                </td>
+                <td className="px-4 py-4 text-center text-sm font-black text-gray-400 tabular-nums">{formatDuration(track.duration_ms)}</td>
+                <td className="pl-4 pr-8 py-4 text-right">
+                   <div className="flex items-center justify-end gap-2">
+                      <span className="text-xs font-bold text-gray-300">{formatDate(track.created_at)}</span>
+                      <button onClick={(e) => { e.stopPropagation(); confirmDelete(track.id, track.title); }} className="opacity-0 group-hover:opacity-100 p-2 text-red-400 hover:bg-red-50 rounded-xl transition-all"><Trash2 className="w-4 h-4" /></button>
+                   </div>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
 
-        {/* Mobile & Tablet Card View (below lg) */}
-        <div className="lg:hidden grid grid-cols-1 md:grid-cols-2 gap-4">
-          {loading ? (
-            [...Array(4)].map((_, i) => (
-              <div key={i} className="bg-white p-5 rounded-[24px] shadow-sm animate-pulse flex gap-4">
-                <div className="w-20 h-20 bg-gray-100 rounded-2xl flex-shrink-0" />
-                <div className="flex-1 space-y-3"><div className="h-4 bg-gray-100 rounded w-3/4" /><div className="h-3 bg-gray-50 rounded w-1/2" /></div>
+      {/* Pagination */}
+      <div className="flex items-center justify-between px-4 py-4">
+        <div className="text-xs font-black text-gray-400 uppercase tracking-widest">{total} Total</div>
+        <div className="flex items-center gap-2">
+          <button onClick={() => handlePageChange(Math.max(1, page - 1))} disabled={page <= 1} className="w-12 h-12 flex items-center justify-center rounded-2xl bg-white border border-gray-200 text-gray-600 disabled:opacity-20"><ChevronLeft className="w-5 h-5" /></button>
+          <div className="bg-gray-900 text-white px-6 h-12 flex items-center rounded-2xl font-black text-sm">{page} / {totalPages}</div>
+          <button onClick={() => handlePageChange(Math.min(totalPages, page + 1))} disabled={page >= totalPages} className="w-12 h-12 flex items-center justify-center rounded-2xl bg-white border border-gray-200 text-gray-600 disabled:opacity-20"><ChevronRight className="w-5 h-5" /></button>
+        </div>
+      </div>
+
+      {/* Track Modal */}
+      {selectedTrack && (
+        <div className="fixed inset-0 z-[150] flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-gray-950/80 backdrop-blur-md" onClick={() => setSelectedTrack(null)} />
+          <div className="relative bg-white w-full max-w-4xl max-h-[90vh] rounded-[40px] shadow-2xl overflow-hidden flex flex-col animate-in fade-in zoom-in duration-300">
+            <div className="px-8 py-6 border-b border-gray-50 flex items-center justify-between">
+              <div className="flex items-center gap-4">
+                <div className="w-12 h-12 rounded-2xl bg-primary/10 flex items-center justify-center text-primary"><Music2 className="w-6 h-6" /></div>
+                <div><h2 className="text-xl font-black text-gray-900">{selectedTrack.title}</h2><p className="text-sm font-bold text-gray-400 uppercase tracking-widest">{selectedTrack.artist}</p></div>
               </div>
-            ))
-          ) : tracks.map((track) => (
-            <div key={track.id} className="bg-white p-4 md:p-5 rounded-[24px] shadow-sm border border-gray-100 flex flex-col sm:flex-row gap-4 active:scale-[0.98] transition-transform">
-              <div className="w-full sm:w-24 h-40 sm:h-24 rounded-2xl overflow-hidden bg-gray-100 flex-shrink-0 relative">
-                <img src={track.thumbnail_url || ''} alt="" className="w-full h-full object-cover" />
-                <div className="absolute top-2 right-2 flex flex-col gap-2">
-                  <button onClick={() => handleNormalize(track.id)} className="p-2 bg-white/90 backdrop-blur-md text-primary rounded-xl shadow-sm active:scale-90 transition-transform"><Wand2 className="w-5 h-5" /></button>
-                  <button onClick={() => confirmDelete(track.id, track.title)} className="p-2 bg-white/90 backdrop-blur-md text-red-500 rounded-xl shadow-sm active:scale-90 transition-transform"><Trash2 className="w-5 h-5" /></button>
+              <button onClick={() => setSelectedTrack(null)} className="p-3 bg-gray-50 hover:bg-gray-100 rounded-full transition-all"><X className="w-6 h-6 text-gray-400" /></button>
+            </div>
+            <div className="flex-1 overflow-y-auto p-10 grid grid-cols-1 lg:grid-cols-2 gap-10">
+              <div className="space-y-8">
+                <img src={selectedTrack.thumbnail_url || ''} alt="" className="aspect-square w-full rounded-[32px] object-cover shadow-xl" />
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="bg-gray-50 p-6 rounded-3xl"><div className="flex items-center gap-2 mb-2"><Activity className="w-4 h-4 text-primary" /><span className="text-[10px] font-black text-gray-400 uppercase">Tempo</span></div><p className="text-2xl font-black">{selectedTrack.bpm ? Math.round(selectedTrack.bpm) : '--'} <span className="text-xs">BPM</span></p></div>
+                  <div className="bg-gray-50 p-6 rounded-3xl"><div className="flex items-center gap-2 mb-2"><Zap className="w-4 h-4 text-orange-500" /><span className="text-[10px] font-black text-gray-400 uppercase">Energy</span></div><p className="text-2xl font-black">{selectedTrack.energy ? Math.round(selectedTrack.energy * 100) : '--'}%</p></div>
                 </div>
               </div>
-              <div className="flex-1 min-w-0 flex flex-col justify-center">
-                <h4 className="font-bold text-gray-900 truncate text-lg sm:text-base">{track.title}</h4>
-                <p className="text-sm font-bold text-gray-400 mb-3 truncate">{track.artist}</p>
-                <div className="flex items-center flex-wrap gap-2 mt-auto">
-                  <span className="text-[10px] font-black uppercase tracking-widest text-primary bg-primary/5 px-2.5 py-1 rounded-lg">{track.genre || 'VARIOUS'}</span>
-                  <span className="text-[10px] font-black uppercase tracking-widest text-gray-400 bg-gray-50 px-2.5 py-1 rounded-lg">{formatDuration(track.duration_ms)}</span>
-                  <span className="text-[10px] font-black uppercase tracking-widest text-gray-300 ml-auto hidden sm:inline">{formatDate(track.created_at)}</span>
+              <div className="flex flex-col min-h-[400px]">
+                <div className="flex items-center gap-3 mb-6"><Mic className="w-5 h-5 text-gray-400" /><h4 className="text-sm font-black text-gray-900 uppercase tracking-[0.2em]">Lyrics</h4></div>
+                <div className="flex-1 bg-gray-50 rounded-[32px] p-8 border border-gray-100 overflow-y-auto">
+                  {selectedTrack.lyrics ? <pre className="text-sm font-bold text-gray-600 leading-relaxed whitespace-pre-wrap font-sans">{selectedTrack.lyrics}</pre> : <div className="h-full flex flex-col items-center justify-center text-center opacity-30"><Loader2 className="w-10 h-10 animate-spin mb-4" /><p className="text-xs font-black uppercase">Searching regional databases...</p></div>}
                 </div>
               </div>
             </div>
-          ))}
-        </div>
-      </div>
-
-      {/* Pagination Controls */}
-      <div className="flex flex-col sm:flex-row items-center justify-between gap-4 py-4 md:py-8">
-        <div className="text-xs md:text-sm font-black text-gray-400 uppercase tracking-widest order-2 sm:order-1">
-          {total} Items Total
-        </div>
-        <div className="flex items-center gap-2 order-1 sm:order-2 w-full sm:w-auto justify-center">
-          <button
-            onClick={() => handlePageChange(Math.max(1, page - 1))}
-            disabled={loading || page <= 1}
-            className="w-12 h-12 flex items-center justify-center rounded-2xl bg-white border border-gray-200 text-gray-600 disabled:opacity-20 hover:shadow-md transition-all active:scale-90"
-          >
-            <ChevronLeft className="w-5 h-5" />
-          </button>
-          <div className="bg-gray-900 text-white px-6 h-12 flex items-center rounded-2xl font-black text-sm shadow-xl shadow-gray-900/10">
-            {page} <span className="mx-2 opacity-30">/</span> {totalPages}
           </div>
-          <button
-            onClick={() => handlePageChange(Math.min(totalPages || 1, page + 1))}
-            disabled={loading || page >= totalPages}
-            className="w-12 h-12 flex items-center justify-center rounded-2xl bg-white border border-gray-200 text-gray-600 disabled:opacity-20 hover:shadow-md transition-all active:scale-90"
-          >
-            <ChevronRight className="w-5 h-5" />
-          </button>
         </div>
-      </div>
+      )}
 
-      {/* Feedback Modal System */}
+      {/* Global Feedback Modal System */}
       {modal.show && (
         <div className="fixed inset-0 z-[200] flex items-center justify-center p-4">
           <div className="absolute inset-0 bg-gray-950/60 backdrop-blur-sm" onClick={() => modal.type !== 'confirm' && setModal({ ...modal, show: false })} />
-          <div className="relative bg-white w-full max-w-sm sm:max-w-md rounded-[32px] shadow-2xl overflow-hidden p-6 sm:p-8 animate-in fade-in zoom-in duration-200">
-             <div className="flex flex-col items-center text-center">
-              <div className={`w-16 h-16 sm:w-20 sm:h-20 rounded-full flex items-center justify-center mb-4 sm:mb-6 ${
-                modal.type === 'error' ? 'bg-red-50 text-red-500' :
-                modal.type === 'success' ? 'bg-green-50 text-green-500' :
-                modal.type === 'confirm' ? 'bg-orange-50 text-orange-500' : 'bg-blue-50 text-primary'
-              }`}>
-                {modal.type === 'error' && <AlertCircle className="w-8 h-8 sm:w-10 sm:h-10" />}
+          <div className="relative bg-white w-full max-w-sm rounded-[32px] shadow-2xl p-8 animate-in fade-in zoom-in duration-200">
+            <div className="flex flex-col items-center text-center">
+              <div className={`w-20 h-20 rounded-full flex items-center justify-center mb-6 ${modal.type === 'error' ? 'bg-red-50 text-red-500' : modal.type === 'success' ? 'bg-green-50 text-green-500' : modal.type === 'confirm' ? 'bg-orange-50 text-orange-500' : 'bg-blue-50 text-primary'}`}>
+                {modal.type === 'error' && <AlertCircle className="w-10 h-10" />}
                 {modal.type === 'success' && <CheckCircle2 className="w-8 h-8 sm:w-10 sm:h-10" />}
-                {modal.type === 'confirm' && <Trash2 className="w-8 h-8 sm:w-10 sm:h-10" />}
+                {modal.type === 'confirm' && <Trash2 className="w-10 h-10" />}
                 {modal.type === 'info' && <Info className="w-8 h-8 sm:w-10 sm:h-10" />}
               </div>
-              <h3 className="text-xl sm:text-2xl font-black text-gray-900 mb-2">{modal.title}</h3>
-              <p className="text-sm sm:text-base text-gray-500 font-medium leading-relaxed mb-6 sm:mb-8">{modal.message}</p>
-              <div className="flex flex-col sm:flex-row items-stretch gap-3 w-full">
+              <h3 className="text-2xl font-black text-gray-900 mb-2">{modal.title}</h3>
+              <p className="text-sm text-gray-500 font-medium mb-8 leading-relaxed">{modal.message}</p>
+              <div className="flex items-center gap-3 w-full">
                 {modal.type === 'confirm' ? (
-                  <>
-                    <button onClick={() => setModal({ ...modal, show: false })} className="order-2 sm:order-1 flex-1 px-6 h-12 sm:h-14 rounded-2xl text-sm font-black text-gray-400 hover:bg-gray-50 transition">Cancel</button>
-                    <button onClick={modal.onConfirm} className="order-1 sm:order-2 flex-1 px-6 h-12 sm:h-14 rounded-2xl text-sm font-black bg-red-500 text-white shadow-lg shadow-red-500/20 hover:bg-red-600 transition">{modal.confirmText || 'Confirm'}</button>
-                  </>
-                ) : (
-                  <button onClick={() => setModal({ ...modal, show: false })} className="w-full px-6 h-12 sm:h-14 rounded-2xl text-sm font-black bg-gray-900 text-white hover:bg-gray-800 transition">Close</button>
-                )}
+                  <><button onClick={() => setModal({ ...modal, show: false })} className="flex-1 px-6 h-14 rounded-2xl text-sm font-black text-gray-400 hover:bg-gray-50 transition">Cancel</button>
+                  <button onClick={modal.onConfirm} className="flex-1 px-6 h-14 rounded-2xl text-sm font-black bg-red-500 text-white shadow-lg shadow-red-500/20">Confirm</button></>
+                ) : <button onClick={() => setModal({ ...modal, show: false })} className="w-full px-6 h-14 rounded-2xl text-sm font-black bg-gray-900 text-white">Close</button>}
               </div>
             </div>
           </div>
@@ -762,43 +631,27 @@ const Library = () => {
 
       {/* Batch Normalize Modal */}
       {showBatchModal && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center p-2 sm:p-4">
+        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
           <div className="absolute inset-0 bg-gray-950/80 backdrop-blur-md" onClick={() => setShowBatchModal(false)} />
-          <div className="relative bg-white w-full max-w-4xl h-full max-h-[90vh] sm:max-h-[85vh] rounded-3xl sm:rounded-[40px] shadow-2xl overflow-hidden flex flex-col animate-in fade-in zoom-in duration-300">
-            <div className="px-6 py-5 sm:px-10 sm:py-8 border-b border-gray-50 flex items-center justify-between bg-white z-10">
-              <div>
-                <h2 className="text-xl sm:text-3xl font-black text-gray-900 tracking-tight">Bulk Clean-up</h2>
-                <p className="text-xs sm:text-sm text-gray-500 font-medium">Review {previewData.length} suggested improvements.</p>
-              </div>
-              <button onClick={() => setShowBatchModal(false)} className="p-2 sm:p-3 bg-gray-50 hover:bg-gray-100 text-gray-400 rounded-full transition-all"><X className="w-5 h-5 sm:w-6 sm:h-6" /></button>
+          <div className="relative bg-white w-full max-w-4xl max-h-[85vh] rounded-[40px] shadow-2xl overflow-hidden flex flex-col animate-in fade-in zoom-in duration-300">
+            <div className="px-10 py-8 border-b border-gray-50 flex items-center justify-between">
+              <div><h2 className="text-3xl font-black text-gray-900">Bulk Clean-up</h2><p className="text-sm text-gray-500">detected {previewData.length} tracks.</p></div>
+              <button onClick={() => setShowBatchModal(false)} className="p-3 bg-gray-50 hover:bg-gray-100 rounded-full"><X className="w-6 h-6 text-gray-400" /></button>
             </div>
-
-            <div className="flex-1 overflow-y-auto p-4 sm:p-10 space-y-4 sm:space-y-6">
+            <div className="flex-1 overflow-y-auto p-10 space-y-6">
               {previewData.map((item) => (
-                <div key={item.id} onClick={() => toggleBatchTrack(item.id)} className={`group flex items-center gap-3 sm:gap-6 p-4 sm:p-6 rounded-2xl sm:rounded-[24px] border-2 transition-all cursor-pointer ${selectedForBatch.has(item.id) ? 'border-primary bg-primary/[0.02]' : 'border-gray-50 bg-gray-50/30 opacity-50 grayscale hover:opacity-100 hover:grayscale-0'}`}>
-                  <div className={`w-8 h-8 sm:w-10 sm:h-10 rounded-lg sm:rounded-xl border-2 flex items-center justify-center transition-all flex-shrink-0 ${selectedForBatch.has(item.id) ? 'bg-primary border-primary text-white scale-110 shadow-lg shadow-primary/20' : 'bg-white border-gray-200 text-transparent'}`}><Check className="w-4 h-4 sm:w-6 sm:h-6" strokeWidth={4} /></div>
-                  <div className="flex-1 grid grid-cols-1 md:grid-cols-2 gap-4 md:gap-10 min-w-0">
-                    <div className="space-y-0.5 sm:space-y-1 truncate">
-                      <span className="text-[8px] sm:text-[10px] font-black text-gray-400 uppercase tracking-[0.2em]">Original</span>
-                      <p className="text-xs sm:text-sm font-bold text-gray-500 line-through decoration-red-400 decoration-1 sm:decoration-2 truncate">{item.current_title}</p>
-                      <p className="text-[10px] sm:text-xs font-medium text-gray-400 truncate">{item.current_artist}</p>
-                    </div>
-                    <div className="space-y-0.5 sm:space-y-1 truncate border-t md:border-t-0 pt-2 md:pt-0">
-                      <span className="text-[8px] sm:text-[10px] font-black text-primary uppercase tracking-[0.2em]">Magic Fix</span>
-                      <p className="text-xs sm:text-sm font-black text-gray-900 truncate">{item.proposed_title}</p>
-                      <p className="text-[10px] sm:text-xs font-bold text-primary truncate">{item.proposed_artist}</p>
-                    </div>
+                <div key={item.id} onClick={() => toggleBatchTrack(item.id)} className={`group flex items-center gap-6 p-6 rounded-[24px] border-2 transition-all cursor-pointer ${selectedForBatch.has(item.id) ? 'border-primary bg-primary/[0.02]' : 'border-gray-50 bg-gray-50/30 opacity-50grayscale'}`}>
+                  <div className={`w-10 h-10 rounded-xl border-2 flex items-center justify-center transition-all ${selectedForBatch.has(item.id) ? 'bg-primary border-primary text-white scale-110 shadow-lg' : 'bg-white border-gray-200 text-transparent'}`}><Check className="w-6 h-6" strokeWidth={4} /></div>
+                  <div className="flex-1 grid grid-cols-1 md:grid-cols-2 gap-10">
+                    <div><span className="text-[10px] font-black text-gray-400 uppercase tracking-widest">Original</span><p className="text-sm font-bold text-gray-500 line-through decoration-red-400">{item.current_title}</p></div>
+                    <div><span className="text-[10px] font-black text-primary uppercase tracking-widest">Magic Fix</span><p className="text-sm font-black text-gray-900">{item.proposed_title}</p></div>
                   </div>
                 </div>
               ))}
             </div>
-
-            <div className="px-6 py-5 sm:px-10 sm:py-8 bg-gray-50/50 flex flex-col md:flex-row items-center justify-between gap-4">
-              <div className="text-xs sm:text-sm font-black text-gray-400 uppercase tracking-widest">{selectedForBatch.size} Selected</div>
-              <div className="flex items-center gap-3 w-full md:w-auto">
-                <button onClick={() => setShowBatchModal(false)} className="flex-1 md:flex-none px-6 h-12 sm:h-14 text-sm font-black text-gray-500 hover:text-gray-900 transition">Cancel</button>
-                <button onClick={handleBatchCommit} disabled={isBatchProcessing || selectedForBatch.size === 0} className="flex-1 md:flex-none bg-primary text-white px-8 sm:px-12 h-12 sm:h-14 rounded-xl sm:rounded-[20px] font-black shadow-xl shadow-primary/20 hover:bg-blue-600 transition-all disabled:opacity-50 text-sm sm:text-base whitespace-nowrap">{isBatchProcessing ? 'Normalizing...' : 'Apply Changes'}</button>
-              </div>
+            <div className="px-10 py-8 bg-gray-50/50 flex items-center justify-between">
+              <div className="text-sm font-black text-gray-400 uppercase tracking-widest"><span className="text-primary">{selectedForBatch.size}</span> Items Selected</div>
+              <div className="flex items-center gap-4"><button onClick={() => setShowBatchModal(false)} className="px-8 h-14 text-sm font-black text-gray-500">Cancel</button><button onClick={handleBatchCommit} disabled={isBatchProcessing || selectedForBatch.size === 0} className="bg-primary text-white px-12 h-14 rounded-[20px] font-black shadow-xl shadow-primary/20 hover:bg-blue-600 transition-all">{isBatchProcessing ? 'Applying...' : 'Apply Changes'}</button></div>
             </div>
           </div>
         </div>

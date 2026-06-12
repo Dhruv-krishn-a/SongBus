@@ -3,7 +3,6 @@ import json
 import os
 from app.core.database import SessionLocal
 from app.models import schema
-from app.api.youtube import get_ytmusic_oauth_client
 from dotenv import load_dotenv
 from ytmusicapi import YTMusic
 

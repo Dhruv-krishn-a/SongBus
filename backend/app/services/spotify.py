@@ -5,6 +5,8 @@ from datetime import datetime, timedelta
 from app.models import schema
 from sqlalchemy.orm import Session
 from fastapi import HTTPException
+import httpx
+import asyncio
 
 class SpotifyService:
     def __init__(self):
@@ -107,3 +109,106 @@ class SpotifyService:
             return True
         except Exception:
             return False
+
+    async def async_search_and_match_track(self, client: httpx.AsyncClient, token: str, track: schema.Track):
+        """Async version of search and match using httpx."""
+        if track.spotify_uri:
+            return track.spotify_uri
+
+        query = f"track:{track.title} artist:{track.artist}"
+        try:
+            response = await client.get(
+                "https://api.spotify.com/v1/search",
+                params={"q": query, "type": "track", "limit": 5},
+                headers={"Authorization": f"Bearer {token}"}
+            )
+            if response.status_code == 200:
+                results = response.json()
+                candidates = results.get("tracks", {}).get("items", [])
+                
+                best_match = None
+                for cand in candidates:
+                    if track.duration_ms:
+                        duration_diff = abs(cand['duration_ms'] - track.duration_ms)
+                        if duration_diff > 10000:
+                            continue
+                    
+                    title_lower = cand['name'].lower()
+                    if "live" in title_lower or "karaoke" in title_lower:
+                        if "live" not in track.title.lower():
+                            continue
+                    
+                    best_match = cand['uri']
+                    break
+                    
+                return best_match
+            elif response.status_code == 429:
+                await asyncio.sleep(int(response.headers.get("Retry-After", 2)))
+            return None
+        except Exception:
+            return None
+
+    async def async_get_audio_features(self, client: httpx.AsyncClient, token: str, track_uris: list):
+        """Async version of get_audio_features using httpx."""
+        if not track_uris:
+            return []
+        
+        ids = [uri.split(":")[-1] for uri in track_uris]
+        
+        try:
+            features = []
+            for i in range(0, len(ids), 100):
+                batch = ids[i:i+100]
+                response = await client.get(
+                    "https://api.spotify.com/v1/audio-features",
+                    params={"ids": ",".join(batch)},
+                    headers={"Authorization": f"Bearer {token}"}
+                )
+                if response.status_code == 200:
+                    data = response.json()
+                    features.extend(data.get("audio_features", []))
+                elif response.status_code == 429:
+                    await asyncio.sleep(int(response.headers.get("Retry-After", 2)))
+            return features
+        except Exception as e:
+            print(f"Spotify Async Audio Features Error: {e}")
+            return []
+
+    def get_audio_features(self, client: spotipy.Spotify, track_uris: list):
+        """
+        Fetches audio features (BPM, Energy, etc.) for a list of track URIs.
+        Spotify allows a maximum of 100 URIs per request.
+        """
+        if not track_uris:
+            return []
+        try:
+            features = []
+            for i in range(0, len(track_uris), 100):
+                batch = track_uris[i:i+100]
+                batch_features = client.audio_features(batch)
+                # client.audio_features can return None for a track if it fails
+                features.extend(batch_features)
+            return features
+        except Exception as e:
+            print(f"Spotify Audio Features Error: {e}")
+            return []
+
+    def get_recently_played_history(self, client: spotipy.Spotify, limit: int = 50):
+        """
+        Fetches the user's recently played tracks from Spotify.
+        """
+        try:
+            return client.current_user_recently_played(limit=limit)
+        except Exception as e:
+            print(f"Spotify History Error: {e}")
+            return None
+
+    def get_library_tracks(self, client: spotipy.Spotify, limit: int = 50, offset: int = 0):
+        """
+        Fetches a page of the user's 'Liked Songs' library.
+        """
+        try:
+            return client.current_user_saved_tracks(limit=limit, offset=offset)
+        except Exception as e:
+            print(f"Spotify Library Error: {e}")
+            return None

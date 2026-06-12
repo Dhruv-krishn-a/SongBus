@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey
+from sqlalchemy import Column, Integer, String, Float, Boolean, DateTime, ForeignKey
 from sqlalchemy.orm import relationship
 from datetime import datetime
 from app.core.database import Base
@@ -52,11 +52,22 @@ class Track(Base):
     external_id = Column(String, nullable=True) # YT/Spotify ID
     source = Column(String) # e.g., "youtube"
     
+    # Deep Data / Spotify DNA
+    bpm = Column(Float, nullable=True)
+    energy = Column(Float, nullable=True)
+    danceability = Column(Float, nullable=True)
+    valence = Column(Float, nullable=True)
+    popularity = Column(Integer, nullable=True)
+    release_year = Column(String, nullable=True)
+    explicit = Column(Boolean, default=False)
+    lyrics = Column(String, nullable=True)
+    
     owner_id = Column(Integer, ForeignKey("users.id"))
     created_at = Column(DateTime, default=datetime.utcnow)
 
     owner = relationship("User", back_populates="tracks")
     playlists = relationship("PlaylistTrack", back_populates="track")
+    history = relationship("PlayHistory", back_populates="track")
 
 class PlaylistTrack(Base):
     __tablename__ = "playlist_tracks"
@@ -67,3 +78,15 @@ class PlaylistTrack(Base):
 
     playlist = relationship("Playlist", back_populates="tracks")
     track = relationship("Track", back_populates="playlists")
+
+class PlayHistory(Base):
+    __tablename__ = "play_history"
+
+    id = Column(Integer, primary_key=True, index=True)
+    owner_id = Column(Integer, ForeignKey("users.id"))
+    track_id = Column(Integer, ForeignKey("tracks.id"))
+    played_at = Column(DateTime, default=datetime.utcnow)
+    platform = Column(String) # "spotify" or "youtube"
+
+    owner = relationship("User")
+    track = relationship("Track", back_populates="history")

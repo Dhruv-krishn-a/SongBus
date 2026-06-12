@@ -2,7 +2,8 @@ import { useEffect, useState, useCallback } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { 
   ShieldAlert, Database, Trash2, CheckCircle2, 
-  AlertCircle, Info, Disc3, Music2, RefreshCw  
+  AlertCircle, Info, Disc3, Music2, RefreshCw,
+  Sparkles, History
 } from 'lucide-react';
 
 type ModalConfig = {
@@ -20,7 +21,7 @@ export default function Settings() {
   const [loading, setLoading] = useState(false);
   const [browserAuth, setBrowserAuth] = useState('');
   const [savingBrowserAuth, setSavingBrowserAuth] = useState(false);
-
+  const [taskRunning, setTaskRunning] = useState(false);
 
   // Custom Modal State
   const [modal, setModal] = useState<ModalConfig>({
@@ -43,6 +44,110 @@ export default function Settings() {
   useEffect(() => {
     fetchStatus();
   }, [fetchStatus]);
+
+  const pollTask = useCallback(async (taskId: string) => {
+    const poll = async () => {
+      try {
+        const res = await fetch(`/api/tasks/${taskId}`, {
+          headers: { Authorization: `Bearer ${token}` }
+        });
+        if (!res.ok) {
+           setTaskRunning(false);
+           return;
+        }
+        const task = await res.json();
+
+        if (task.status === 'completed') {
+          setModal({
+            show: true,
+            type: 'success',
+            title: 'Job Complete',
+            message: task.result?.message || 'The task finished successfully.'
+          });
+          setTaskRunning(false);
+          return;
+        }
+
+        if (task.status === 'failed') {
+          setModal({
+            show: true,
+            type: 'error',
+            title: 'Job Failed',
+            message: task.error || 'Something went wrong during the background process.'
+          });
+          setTaskRunning(false);
+          return;
+        }
+
+        // Show live progress
+        setModal({
+          show: true,
+          type: 'info',
+          title: task.name + ' in Progress',
+          message: task.message + (task.total ? ` (${task.progress} / ${task.total})` : '')
+        });
+
+        setTimeout(poll, 1500);
+      } catch (err) {
+        console.error('Polling error:', err);
+        setTaskRunning(false);
+      }
+    };
+    poll();
+  }, [token]);
+
+  const handleEnrichLibrary = async () => {
+    if (!token) return;
+    setTaskRunning(true);
+    
+    // Instead of a blocking modal, we just show a quick starting message
+    setModal({ show: true, type: 'info', title: 'Shadow Sync Started', message: 'Library enrichment is now running silently in the background. You can safely close this and continue using the app.' });
+
+    try {
+      const res = await fetch('/api/music/enrich-all', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      const data = await res.json();
+      if (res.ok && data.task_id) {
+        // We do NOT poll with a blocking modal anymore for enrichment
+        // The backend will process this completely asynchronously at high speed.
+        setTimeout(() => {
+            setModal({ show: false, type: 'info', title: '', message: '' });
+            setTaskRunning(false);
+        }, 3000);
+      } else {
+        setTaskRunning(false);
+        setModal({ show: true, type: 'error', title: 'Failed to Start', message: data.detail || 'Could not start enrichment.' });
+      }
+    } catch (err: any) {
+      setTaskRunning(false);
+      setModal({ show: true, type: 'error', title: 'Error', message: err.message });
+    }
+  };
+
+  const handleSyncHistory = async () => {
+    if (!token) return;
+    setTaskRunning(true);
+    setModal({ show: true, type: 'info', title: 'History Sync Started', message: 'Fetching your recently played tracks from connected accounts...' });
+
+    try {
+      const res = await fetch('/api/music/sync-history', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      const data = await res.json();
+      if (res.ok && data.task_id) {
+        pollTask(data.task_id);
+      } else {
+        setTaskRunning(false);
+        setModal({ show: true, type: 'error', title: 'Failed to Start', message: data.detail || 'Could not start sync.' });
+      }
+    } catch (err: any) {
+      setTaskRunning(false);
+      setModal({ show: true, type: 'error', title: 'Error', message: err.message });
+    }
+  };
 
   const handleSpotifyConnect = async () => {
     try {
@@ -105,7 +210,6 @@ export default function Settings() {
     if (!token || !browserAuth.trim()) return;
 
     setSavingBrowserAuth(true);
-
     try {
       const res = await fetch('/api/integrations/youtube/browser-auth', {
         method: 'POST',
@@ -200,7 +304,7 @@ export default function Settings() {
                 </div>
                 <div>
                   <h3 className="font-bold text-gray-900">Spotify</h3>
-                  <p className="text-xs text-gray-400 font-bold uppercase tracking-wider">Export & Sync</p>
+                  <p className="text-xs text-gray-400 font-bold uppercase tracking-wider">DNA & Export</p>
                 </div>
               </div>
               {status.spotify_connected ? (
@@ -235,6 +339,49 @@ export default function Settings() {
           </div>
         </section>
 
+        {/* Data Management Section */}
+        <section className="bg-white rounded-[32px] border border-gray-100 shadow-xl shadow-gray-200/40 p-8 sm:p-10">
+          <div className="flex items-center gap-4 mb-8">
+            <div className="w-12 h-12 bg-purple-50 rounded-2xl flex items-center justify-center text-purple-600">
+              <Sparkles className="w-6 h-6" />
+            </div>
+            <div>
+              <h2 className="text-xl font-black text-gray-900">Data Management</h2>
+              <p className="text-sm text-gray-500 font-medium">Supercharge your library with metadata.</p>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <button 
+              onClick={handleEnrichLibrary}
+              disabled={taskRunning}
+              className="flex items-center justify-center gap-3 p-6 rounded-2xl bg-gray-50 hover:bg-primary/5 border border-gray-100 group transition-all disabled:opacity-50"
+            >
+              <div className="w-10 h-10 bg-white rounded-xl shadow-sm flex items-center justify-center text-primary group-hover:scale-110 transition-transform">
+                <Sparkles className="w-5 h-5" />
+              </div>
+              <div className="text-left">
+                <p className="font-bold text-gray-900">Enrich Library</p>
+                <p className="text-[10px] font-black text-gray-400 uppercase tracking-widest leading-none mt-1">BPM, Energy & Lyrics</p>
+              </div>
+            </button>
+
+            <button 
+              onClick={handleSyncHistory}
+              disabled={taskRunning}
+              className="flex items-center justify-center gap-3 p-6 rounded-2xl bg-gray-50 hover:bg-blue-50 border border-gray-100 group transition-all disabled:opacity-50"
+            >
+              <div className="w-10 h-10 bg-white rounded-xl shadow-sm flex items-center justify-center text-blue-600 group-hover:scale-110 transition-transform">
+                <History className="w-5 h-5" />
+              </div>
+              <div className="text-left">
+                <p className="font-bold text-gray-900">Sync History</p>
+                <p className="text-[10px] font-black text-gray-400 uppercase tracking-widest leading-none mt-1">Fetch Recent Activity</p>
+              </div>
+            </button>
+          </div>
+        </section>
+
         {/* Browser Auth Section */}
         <section className="bg-white rounded-[32px] border border-gray-100 shadow-xl shadow-gray-200/40 p-8 sm:p-10">
           <div className="flex items-center gap-4 mb-6">
@@ -248,8 +395,7 @@ export default function Settings() {
           </div>
           
           <p className="text-sm text-gray-400 font-medium leading-relaxed mb-6">
-            To access your private playlists and "Liked Music", paste the request headers from an authenticated YouTube Music session. 
-            You can find these in your browser's Developer Tools (Network Tab).
+            To access your private playlists and "Liked Music", paste the request headers from an authenticated YouTube Music session.
           </p>
 
           <textarea
@@ -285,7 +431,7 @@ export default function Settings() {
             <div className="flex-1">
               <h3 className="font-black text-gray-900 mb-1">Clear Music Database</h3>
               <p className="text-sm text-gray-500 font-medium leading-relaxed">
-                Wipe all tracks and classification history. This will not affect your connected accounts, only the local SongBus data.
+                Wipe all tracks and history. This will not affect your connected accounts.
               </p>
             </div>
             <button 
