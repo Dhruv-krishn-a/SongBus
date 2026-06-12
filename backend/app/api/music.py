@@ -632,13 +632,9 @@ GLOBAL_URI_CACHE = {}
 GLOBAL_LYRICS_CACHE = {}
 
 def _enrich_library_task(task_id: str, user_id: int, include_lyrics: bool = False):
-    import asyncio
-    asyncio.run(_enrich_library_task_async(task_id, user_id, include_lyrics))
-
-async def _enrich_library_task_async(task_id: str, user_id: int, include_lyrics: bool):
-    import httpx
-    import asyncio
+    import concurrent.futures
     from datetime import datetime, timedelta
+    from app.services.ytmusic import YTMusicService
     
     db = SessionLocal()
     try:
@@ -667,80 +663,70 @@ async def _enrich_library_task_async(task_id: str, user_id: int, include_lyrics:
         total_tracks = len(tracks)
         tasks.update_task(task_id, total=total_tracks, message=f"Starting High-Speed Bridge...")
 
-        spotify_token = None
+        # Initialize Services ONCE outside the loop to save massive overhead
         spotify_service = SpotifyService()
+        spotify_client = None
         if user.spotify_access_token:
             try:
-                client = spotify_service.get_valid_client(user, db)
-                spotify_token = client._auth
+                spotify_client = spotify_service.get_valid_client(user, db)
             except Exception: pass
+            
+        yt_service = YTMusicService(user.ytmusic_browser_auth)
 
         processed_count = 0
         enriched_count = 0
-        chunk_size = 10 # Small chunks for real-time progress
-        semaphore = asyncio.Semaphore(15) 
-
-        async def fetch_one(client: httpx.AsyncClient, t_dict: dict):
-            """Pure network-only worker. No DB access here."""
-            res = {"spotify_uri": None, "yt_id": None, "lyrics": None}
-            async with semaphore:
+        
+        def process_track(track):
+            """Stable synchronous worker for a single track."""
+            has_new = False
+            try:
                 # 1. Spotify Match
-                if spotify_token and not t_dict.get("spotify_uri"):
-                    res["spotify_uri"] = await spotify_service.async_search_and_match_track(
-                        client, spotify_token, t_dict['title'], t_dict['artist'], t_dict.get('duration_ms')
-                    )
+                if spotify_client and not track.spotify_uri:
+                    uri = spotify_service.search_and_match_track(spotify_client, track)
+                    if uri:
+                        track.spotify_uri = uri
+                        has_new = True
                 
                 # 2. YouTube Match
-                if not t_dict.get("matched_youtube_id") and t_dict.get("source") == "spotify":
-                    from app.services.ytmusic import YTMusicService
-                    yt = YTMusicService()
-                    # Run sync search in thread pool to not block async loop
-                    res["yt_id"] = await asyncio.get_event_loop().run_in_executor(
-                        None, yt.search_and_match_track, t_dict['title'], t_dict['artist'], t_dict.get('duration_ms')
-                    )
+                if not track.matched_youtube_id and track.source == "spotify":
+                    yt_id = yt_service.search_and_match_track(track.title, track.artist, track.duration_ms)
+                    if yt_id:
+                        track.matched_youtube_id = yt_id
+                        has_new = True
 
                 # 3. Lyrics
-                if include_lyrics and not t_dict.get("lyrics"):
-                    res["lyrics"] = await LyricsService.async_fetch_lyrics(
-                        client, t_dict['title'], t_dict['artist'], t_dict.get('album'), t_dict.get('duration_ms')
-                    )
-            return res
+                if include_lyrics and not track.lyrics:
+                    lyrics = LyricsService.fetch_lyrics(track.title, track.artist, track.album, track.duration_ms)
+                    if lyrics:
+                        track.lyrics = lyrics
+                        has_new = True
+            except Exception as e:
+                print(f"Error enriching track {track.id}: {e}")
+            
+            # Always mark as attempted
+            track.last_enriched_at = datetime.utcnow()
+            return has_new
 
-        async with httpx.AsyncClient(timeout=10.0, headers=LyricsService.HEADERS) as client:
+        # Use 5 parallel workers for stability
+        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+            chunk_size = 10
             for i in range(0, total_tracks, chunk_size):
                 chunk = tracks[i : i + chunk_size]
                 
-                # Snapshot track data into dicts for thread safety
-                track_dicts = [
-                    {
-                        "title": t.title, "artist": t.artist, "album": t.album, 
-                        "duration_ms": t.duration_ms, "spotify_uri": t.spotify_uri,
-                        "matched_youtube_id": t.matched_youtube_id, "lyrics": t.lyrics,
-                        "source": t.source
-                    } for t in chunk
-                ]
-
-                # Run parallel requests for this chunk
-                coroutines = [fetch_one(client, d) for d in track_dicts]
-                chunk_results = await asyncio.gather(*coroutines, return_exceptions=True)
-
-                # Apply results to ORM objects and DB (Main task thread)
-                for idx, r in enumerate(chunk_results):
-                    t = chunk[idx]
-                    t.last_enriched_at = datetime.utcnow()
-                    if isinstance(r, dict):
-                        if r.get("spotify_uri"): t.spotify_uri = r["spotify_uri"]; enriched_count += 1
-                        if r.get("yt_id"): t.matched_youtube_id = r["yt_id"]; enriched_count += 1
-                        if r.get("lyrics"): t.lyrics = r["lyrics"]; enriched_count += 1
-
-                # Bulk Fetch DNA for matches
-                if spotify_token:
-                    uris = [t.spotify_uri for t in chunk if t.spotify_uri and t.bpm is None]
-                    if uris:
-                        track_map = {t.spotify_uri: t for t in chunk if t.spotify_uri}
+                futures = {executor.submit(process_track, t): t for t in chunk}
+                for future in concurrent.futures.as_completed(futures):
+                    if future.result():
+                        enriched_count += 1
+                
+                # Bulk DNA
+                if spotify_client:
+                    matched_in_chunk = [t for t in chunk if t.spotify_uri and t.bpm is None]
+                    if matched_in_chunk:
+                        uris = [t.spotify_uri for t in matched_in_chunk]
+                        track_map = {t.spotify_uri: t for t in matched_in_chunk}
                         try:
-                            dna = await spotify_service.async_get_audio_features(client, spotify_token, uris)
-                            for f in dna or []:
+                            features = spotify_service.get_audio_features(spotify_client, uris)
+                            for f in features or []:
                                 if f and f.get("uri") in track_map:
                                     target = track_map[f["uri"]]
                                     target.bpm = f.get("tempo")
@@ -753,13 +739,7 @@ async def _enrich_library_task_async(task_id: str, user_id: int, include_lyrics:
                 tasks.update_task(task_id, progress=processed_count, message=f"Building Bridge ({processed_count}/{total_tracks})...")
                 db.commit()
 
-        tasks.update_task(
-            task_id, 
-            status="completed", 
-            message=f"Bridge build complete! Updated {enriched_count} data points.", 
-            progress=total_tracks,
-            result={"enriched_count": enriched_count}
-        )
+        tasks.update_task(task_id, status="completed", message=f"Bridge build complete! Updated {enriched_count} tracks.", progress=total_tracks)
 
     except Exception as exc:
         db.rollback()
