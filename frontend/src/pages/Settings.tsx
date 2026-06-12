@@ -22,6 +22,7 @@ export default function Settings() {
   const [browserAuth, setBrowserAuth] = useState('');
   const [savingBrowserAuth, setSavingBrowserAuth] = useState(false);
   const [taskRunning, setTaskRunning] = useState(false);
+  const [enrichProgress, setEnrichProgress] = useState<{ message: string, progress: number, total: number, active: boolean } | null>(null);
 
   // Custom Modal State
   const [modal, setModal] = useState<ModalConfig>({
@@ -96,12 +97,64 @@ export default function Settings() {
     poll();
   }, [token]);
 
+  const pollShadowTask = useCallback(async (taskId: string) => {
+    const poll = async () => {
+      try {
+        const res = await fetch(`/api/tasks/${taskId}`, {
+          headers: { Authorization: `Bearer ${token}` }
+        });
+        if (!res.ok) {
+           setEnrichProgress(null);
+           setTaskRunning(false);
+           return;
+        }
+        const task = await res.json();
+
+        if (task.status === 'completed') {
+          setEnrichProgress(null);
+          setTaskRunning(false);
+          setModal({
+            show: true,
+            type: 'success',
+            title: 'Enrichment Complete',
+            message: task.result?.message || 'Successfully enriched library.'
+          });
+          return;
+        }
+
+        if (task.status === 'failed') {
+          setEnrichProgress(null);
+          setTaskRunning(false);
+          setModal({
+            show: true,
+            type: 'error',
+            title: 'Enrichment Failed',
+            message: task.error || 'Something went wrong.'
+          });
+          return;
+        }
+
+        setEnrichProgress({
+           message: task.message,
+           progress: task.progress,
+           total: task.total,
+           active: true
+        });
+
+        setTimeout(poll, 1500);
+      } catch (err) {
+        console.error('Polling error:', err);
+        setEnrichProgress(null);
+        setTaskRunning(false);
+      }
+    };
+    poll();
+  }, [token]);
+
   const handleEnrichLibrary = async () => {
     if (!token) return;
     setTaskRunning(true);
-    
-    // Instead of a blocking modal, we just show a quick starting message
-    setModal({ show: true, type: 'info', title: 'Shadow Sync Started', message: 'Library enrichment is now running silently in the background. You can safely close this and continue using the app.' });
+    setEnrichProgress({ message: 'Starting...', progress: 0, total: 100, active: true });
 
     try {
       const res = await fetch('/api/music/enrich-all', {
@@ -110,18 +163,15 @@ export default function Settings() {
       });
       const data = await res.json();
       if (res.ok && data.task_id) {
-        // We do NOT poll with a blocking modal anymore for enrichment
-        // The backend will process this completely asynchronously at high speed.
-        setTimeout(() => {
-            setModal({ show: false, type: 'info', title: '', message: '' });
-            setTaskRunning(false);
-        }, 3000);
+        pollShadowTask(data.task_id);
       } else {
         setTaskRunning(false);
+        setEnrichProgress(null);
         setModal({ show: true, type: 'error', title: 'Failed to Start', message: data.detail || 'Could not start enrichment.' });
       }
     } catch (err: any) {
       setTaskRunning(false);
+      setEnrichProgress(null);
       setModal({ show: true, type: 'error', title: 'Error', message: err.message });
     }
   };
@@ -354,22 +404,32 @@ export default function Settings() {
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <button 
               onClick={handleEnrichLibrary}
-              disabled={taskRunning}
-              className="flex items-center justify-center gap-3 p-6 rounded-2xl bg-gray-50 hover:bg-primary/5 border border-gray-100 group transition-all disabled:opacity-50"
+              disabled={taskRunning || enrichProgress?.active}
+              className="flex items-center justify-center gap-3 p-6 rounded-2xl bg-gray-50 hover:bg-primary/5 border border-gray-100 group transition-all disabled:opacity-50 relative overflow-hidden text-left"
             >
-              <div className="w-10 h-10 bg-white rounded-xl shadow-sm flex items-center justify-center text-primary group-hover:scale-110 transition-transform">
-                <Sparkles className="w-5 h-5" />
+              {enrichProgress?.active && enrichProgress.total > 0 && (
+                <div 
+                  className="absolute bottom-0 left-0 h-1 bg-primary transition-all duration-500" 
+                  style={{ width: `${Math.min(100, (enrichProgress.progress / enrichProgress.total) * 100)}%` }} 
+                />
+              )}
+              <div className="w-10 h-10 bg-white rounded-xl shadow-sm flex items-center justify-center text-primary group-hover:scale-110 transition-transform flex-shrink-0">
+                {enrichProgress?.active ? <RefreshCw className="w-5 h-5 animate-spin" /> : <Sparkles className="w-5 h-5" />}
               </div>
-              <div className="text-left">
-                <p className="font-bold text-gray-900">Enrich Library</p>
-                <p className="text-[10px] font-black text-gray-400 uppercase tracking-widest leading-none mt-1">BPM, Energy & Lyrics</p>
+              <div className="text-left w-full overflow-hidden">
+                <p className="font-bold text-gray-900 truncate">{enrichProgress?.active ? 'Enriching Library...' : 'Enrich Library'}</p>
+                <p className="text-[10px] font-black text-gray-400 uppercase tracking-widest leading-none mt-1 truncate">
+                  {enrichProgress?.active 
+                    ? `${enrichProgress.progress} / ${enrichProgress.total} Tracks` 
+                    : 'BPM, Energy & Lyrics'}
+                </p>
               </div>
             </button>
 
             <button 
               onClick={handleSyncHistory}
               disabled={taskRunning}
-              className="flex items-center justify-center gap-3 p-6 rounded-2xl bg-gray-50 hover:bg-blue-50 border border-gray-100 group transition-all disabled:opacity-50"
+              className="flex items-center justify-center gap-3 p-6 rounded-2xl bg-gray-50 hover:bg-blue-50 border border-gray-100 group transition-all disabled:opacity-50 text-left"
             >
               <div className="w-10 h-10 bg-white rounded-xl shadow-sm flex items-center justify-center text-blue-600 group-hover:scale-110 transition-transform">
                 <History className="w-5 h-5" />
