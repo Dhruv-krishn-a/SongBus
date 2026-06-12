@@ -625,15 +625,101 @@ def _sync_history_task(task_id: str, user_id: int):
         db.close()
 
 
-@router.post("/enrich-all")
-def enrich_all_tracks(
-    background_tasks: BackgroundTasks,
+@router.get("/enrich/pending")
+def get_pending_enrichment_tracks(
     current_user: schema.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
-    """Starts a background task to enrich all tracks with Spotify DNA and Lyrics."""
-    task_id = tasks.create_task("Data Enrichment")
-    background_tasks.add_task(_enrich_library_task, task_id, current_user.id)
-    return {"task_id": task_id, "message": "Enrichment started in background"}
+    """Returns a list of track IDs that still need enrichment (missing lyrics or BPM)."""
+    tracks = (
+        db.query(schema.Track.id)
+        .filter(
+            schema.Track.owner_id == current_user.id,
+            (schema.Track.lyrics == None) | (schema.Track.bpm == None)
+        )
+        .all()
+    )
+    return {"track_ids": [t[0] for t in tracks], "total": len(tracks)}
+
+class EnrichChunkRequest(BaseModel):
+    track_ids: List[int]
+
+@router.post("/enrich/chunk")
+async def enrich_tracks_chunk(
+    request: EnrichChunkRequest,
+    current_user: schema.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Synchronously processes a single chunk of tracks for enrichment. Designed for serverless."""
+    import httpx
+    import asyncio
+    
+    tracks = db.query(schema.Track).filter(schema.Track.id.in_(request.track_ids), schema.Track.owner_id == current_user.id).all()
+    if not tracks:
+        return {"enriched_count": 0}
+
+    spotify_service = None
+    spotify_token = None
+    if current_user.spotify_access_token:
+        spotify_service = SpotifyService()
+        try:
+            client = spotify_service.get_valid_client(current_user, db)
+            spotify_token = client._auth
+        except Exception as exc:
+            print(f"Spotify client error: {exc}")
+
+    enriched_count = 0
+    semaphore = asyncio.Semaphore(10) # Safe limit for serverless functions
+
+    async def process_single_track(client: httpx.AsyncClient, track):
+        has_new_data = False
+        async with semaphore:
+            # 1. Spotify Match
+            if spotify_token and not track.spotify_uri:
+                uri = await spotify_service.async_search_and_match_track(client, spotify_token, track)
+                if uri:
+                    track.spotify_uri = uri
+                    has_new_data = True
+            
+            # 2. Lyrics
+            if not track.lyrics:
+                lyrics = await LyricsService.async_fetch_lyrics(client, track.title, track.artist, track.album, track.duration_ms)
+                if lyrics:
+                    track.lyrics = lyrics
+                    has_new_data = True
+        return has_new_data
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        coroutines = [process_single_track(client, t) for t in tracks]
+        results = await asyncio.gather(*coroutines, return_exceptions=True)
+        
+        for r in results:
+            if isinstance(r, bool) and r:
+                enriched_count += 1
+
+        # Bulk fetch Spotify DNA for the chunk
+        if spotify_token and spotify_service:
+            uris_to_fetch = [t.spotify_uri for t in tracks if t.spotify_uri and not t.bpm]
+            if uris_to_fetch:
+                track_lookup = {t.spotify_uri: t for t in tracks if t.spotify_uri}
+                try:
+                    features = await spotify_service.async_get_audio_features(client, spotify_token, uris_to_fetch)
+                except Exception as exc:
+                    print(f"Spotify audio feature error: {exc}")
+                    features = []
+
+                for f in features or []:
+                    if f and isinstance(f, dict) and "uri" in f:
+                        track = track_lookup.get(f["uri"])
+                        if track:
+                            track.bpm = f.get("tempo")
+                            track.energy = f.get("energy")
+                            track.danceability = f.get("danceability")
+                            track.valence = f.get("valence")
+                            enriched_count += 1
+
+    db.commit()
+    return {"message": f"Processed {len(tracks)} tracks", "enriched_count": enriched_count}
 
 
 @router.post("/sync-history")

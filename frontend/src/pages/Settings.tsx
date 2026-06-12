@@ -97,78 +97,82 @@ export default function Settings() {
     poll();
   }, [token]);
 
-  const pollShadowTask = useCallback(async (taskId: string) => {
-    const poll = async () => {
-      try {
-        const res = await fetch(`/api/tasks/${taskId}`, {
-          headers: { Authorization: `Bearer ${token}` }
-        });
-        if (!res.ok) {
-           setEnrichProgress(null);
-           setTaskRunning(false);
-           return;
-        }
-        const task = await res.json();
-
-        if (task.status === 'completed') {
-          setEnrichProgress(null);
-          setTaskRunning(false);
-          setModal({
-            show: true,
-            type: 'success',
-            title: 'Enrichment Complete',
-            message: task.result?.message || 'Successfully enriched library.'
-          });
-          return;
-        }
-
-        if (task.status === 'failed') {
-          setEnrichProgress(null);
-          setTaskRunning(false);
-          setModal({
-            show: true,
-            type: 'error',
-            title: 'Enrichment Failed',
-            message: task.error || 'Something went wrong.'
-          });
-          return;
-        }
-
-        setEnrichProgress({
-           message: task.message,
-           progress: task.progress,
-           total: task.total,
-           active: true
-        });
-
-        setTimeout(poll, 1500);
-      } catch (err) {
-        console.error('Polling error:', err);
-        setEnrichProgress(null);
-        setTaskRunning(false);
-      }
-    };
-    poll();
-  }, [token]);
-
   const handleEnrichLibrary = async () => {
     if (!token) return;
     setTaskRunning(true);
-    setEnrichProgress({ message: 'Starting...', progress: 0, total: 100, active: true });
+    setEnrichProgress({ message: 'Fetching pending tracks...', progress: 0, total: 100, active: true });
 
     try {
-      const res = await fetch('/api/music/enrich-all', {
-        method: 'POST',
+      // 1. Get all pending track IDs
+      const pendingRes = await fetch('/api/music/enrich/pending', {
         headers: { Authorization: `Bearer ${token}` }
       });
-      const data = await res.json();
-      if (res.ok && data.task_id) {
-        pollShadowTask(data.task_id);
-      } else {
+      const pendingData = await pendingRes.json();
+      
+      if (!pendingRes.ok) throw new Error(pendingData.detail || 'Failed to fetch pending tracks');
+      
+      const trackIds: number[] = pendingData.track_ids || [];
+      const totalTracks = trackIds.length;
+      
+      if (totalTracks === 0) {
         setTaskRunning(false);
         setEnrichProgress(null);
-        setModal({ show: true, type: 'error', title: 'Failed to Start', message: data.detail || 'Could not start enrichment.' });
+        setModal({ show: true, type: 'info', title: 'Already Up to Date', message: 'All your tracks are already fully enriched with lyrics and Spotify DNA.' });
+        return;
       }
+
+      setEnrichProgress({ message: `Starting batch process...`, progress: 0, total: totalTracks, active: true });
+
+      // 2. Process in chunks
+      const chunkSize = 50; // Process 50 tracks per API call
+      let processedCount = 0;
+      let totalEnriched = 0;
+
+      for (let i = 0; i < totalTracks; i += chunkSize) {
+        const chunk = trackIds.slice(i, i + chunkSize);
+        
+        try {
+          const chunkRes = await fetch('/api/music/enrich/chunk', {
+            method: 'POST',
+            headers: { 
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${token}` 
+            },
+            body: JSON.stringify({ track_ids: chunk })
+          });
+          
+          if (!chunkRes.ok) {
+            console.error(`Chunk failed: ${await chunkRes.text()}`);
+            // Don't break completely, try to continue with the next chunk
+            continue; 
+          }
+          
+          const chunkData = await chunkRes.json();
+          totalEnriched += chunkData.enriched_count || 0;
+          
+        } catch (err) {
+          console.error(`Chunk request error:`, err);
+        }
+
+        processedCount += chunk.length;
+        setEnrichProgress({ 
+          message: `Enriching via Serverless Sync...`, 
+          progress: processedCount, 
+          total: totalTracks, 
+          active: true 
+        });
+      }
+
+      // 3. Complete
+      setTaskRunning(false);
+      setEnrichProgress(null);
+      setModal({ 
+        show: true, 
+        type: 'success', 
+        title: 'Enrichment Complete', 
+        message: `Successfully processed ${processedCount} tracks and enriched ${totalEnriched} with new deep data.` 
+      });
+
     } catch (err: any) {
       setTaskRunning(false);
       setEnrichProgress(null);
