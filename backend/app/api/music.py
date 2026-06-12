@@ -4,7 +4,7 @@ import json
 import os
 import re
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List
 
 import requests
@@ -407,233 +407,13 @@ def get_playlists(current_user: schema.User = Depends(get_current_user), db: Ses
     return {"playlists": playlists}
 
 
-def _enrich_library_task(task_id: str, user_id: int):
-    import asyncio
-    asyncio.run(_enrich_library_task_async(task_id, user_id))
-
-async def _enrich_library_task_async(task_id: str, user_id: int):
-    import httpx
-    import asyncio
-    
-    db = SessionLocal()
-    try:
-        user = db.query(schema.User).filter(schema.User.id == user_id).first()
-        if not user:
-            tasks.update_task(task_id, status="failed", error="User not found")
-            return
-
-        tracks = db.query(schema.Track).filter(schema.Track.owner_id == user_id).all()
-        if not tracks:
-            tasks.update_task(task_id, status="completed", message="Library is empty.", progress=0, total=0)
-            return
-
-        total_tracks = len(tracks)
-        tasks.update_task(task_id, total=total_tracks, message="Starting high-speed shadow enrichment...")
-
-        spotify_service = None
-        spotify_token = None
-        if user.spotify_access_token:
-            spotify_service = SpotifyService()
-            try:
-                # Get valid client just to refresh token if needed, then extract the raw token
-                client = spotify_service.get_valid_client(user, db)
-                spotify_token = client._auth
-            except Exception as exc:
-                print(f"Spotify client error: {exc}")
-
-        processed_count = 0
-        enriched_count = 0
-        chunk_size = 100 # Larger chunks for async processing
-        
-        # Concurrency limit to prevent hitting API limits instantly
-        semaphore = asyncio.Semaphore(50) 
-        
-        async def process_single_track(client: httpx.AsyncClient, track):
-            has_new_data = False
-            async with semaphore:
-                # 1. Spotify Match
-                if spotify_token and not track.spotify_uri:
-                    uri = await spotify_service.async_search_and_match_track(client, spotify_token, track)
-                    if uri:
-                        track.spotify_uri = uri
-                        has_new_data = True
-                
-                # 2. Lyrics
-                if not track.lyrics:
-                    lyrics = await LyricsService.async_fetch_lyrics(client, track.title, track.artist, track.album, track.duration_ms)
-                    if lyrics:
-                        track.lyrics = lyrics
-                        has_new_data = True
-            return has_new_data
-
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            for i in range(0, total_tracks, chunk_size):
-                chunk = tracks[i : i + chunk_size]
-                chunk_touched = False
-
-                # Launch async requests for lyrics and spotify match
-                coroutines = [process_single_track(client, t) for t in chunk]
-                results = await asyncio.gather(*coroutines, return_exceptions=True)
-                
-                for r in results:
-                    if isinstance(r, bool) and r:
-                        chunk_touched = True
-                        enriched_count += 1
-
-                # Bulk fetch Spotify DNA for the chunk
-                if spotify_token and spotify_service:
-                    uris_to_fetch = [t.spotify_uri for t in chunk if t.spotify_uri and not t.bpm]
-                    if uris_to_fetch:
-                        track_lookup = {t.spotify_uri: t for t in chunk if t.spotify_uri}
-                        try:
-                            features = await spotify_service.async_get_audio_features(client, spotify_token, uris_to_fetch)
-                        except Exception as exc:
-                            print(f"Spotify audio feature error: {exc}")
-                            features = []
-
-                        for f in features or []:
-                            if f and isinstance(f, dict) and "uri" in f:
-                                track = track_lookup.get(f["uri"])
-                                if track:
-                                    track.bpm = f.get("tempo")
-                                    track.energy = f.get("energy")
-                                    track.danceability = f.get("danceability")
-                                    track.valence = f.get("valence")
-                                    chunk_touched = True
-
-                processed_count += len(chunk)
-                tasks.update_task(
-                    task_id,
-                    progress=processed_count,
-                    message=f"Enriching {processed_count}/{total_tracks} tracks via shadow sync...",
-                )
-                db.commit()
-
-        result = {"message": f"Successfully enriched tracks with {enriched_count} updated items."}
-        tasks.update_task(
-            task_id,
-            status="completed",
-            message="Enrichment complete!",
-            progress=total_tracks,
-            result=result,
-        )
-
-    except Exception as exc:
-        db.rollback()
-        tasks.update_task(task_id, status="failed", error=str(exc))
-    finally:
-        db.close()
-
-
-def _sync_history_task(task_id: str, user_id: int):
-    db = SessionLocal()
-    try:
-        user = db.query(schema.User).filter(schema.User.id == user_id).first()
-        if not user:
-            tasks.update_task(task_id, status="failed", error="User not found")
-            return
-
-        tasks.update_task(task_id, total=50, message="Syncing listening history...")
-
-        added_history_count = 0
-        processed_count = 0
-
-        def get_or_create_track(title, artist, ext_id=None, source=None):
-            t = None
-            if ext_id:
-                t = (
-                    db.query(schema.Track)
-                    .filter(schema.Track.owner_id == user.id, schema.Track.external_id == ext_id)
-                    .first()
-                )
-            if not t:
-                t = (
-                    db.query(schema.Track)
-                    .filter(schema.Track.owner_id == user.id, schema.Track.title == title, schema.Track.artist == artist)
-                    .first()
-                )
-            if not t:
-                t = schema.Track(title=title, artist=artist, external_id=ext_id, source=source or "history", owner_id=user.id)
-                db.add(t)
-                db.flush()
-            return t
-
-        if user.spotify_access_token:
-            spotify_service = SpotifyService()
-            try:
-                spotify_client = spotify_service.get_valid_client(user, db)
-                history = spotify_service.get_recently_played_history(spotify_client, limit=50)
-                if history and "items" in history:
-                    for item in history["items"]:
-                        track_data = item.get("track", {})
-                        played_at_str = item.get("played_at")
-                        if not track_data or not played_at_str:
-                            continue
-
-                        try:
-                            played_at = datetime.fromisoformat(played_at_str.replace("Z", "+00:00")).replace(tzinfo=None)
-                        except Exception:
-                            played_at = datetime.utcnow()
-
-                        ext_id = track_data.get("id")
-                        uri = track_data.get("uri")
-                        title = track_data.get("name")
-                        artists = ", ".join([a.get("name") for a in track_data.get("artists", [])])
-
-                        t = get_or_create_track(title, artists, ext_id, "spotify")
-                        if uri and not t.spotify_uri:
-                            t.spotify_uri = uri
-
-                        existing_hist = (
-                            db.query(schema.PlayHistory)
-                            .filter(
-                                schema.PlayHistory.owner_id == user.id,
-                                schema.PlayHistory.track_id == t.id,
-                                schema.PlayHistory.played_at == played_at,
-                            )
-                            .first()
-                        )
-
-                        if not existing_hist:
-                            db.add(
-                                schema.PlayHistory(
-                                    owner_id=user.id,
-                                    track_id=t.id,
-                                    played_at=played_at,
-                                    platform="spotify",
-                                )
-                            )
-                            added_history_count += 1
-
-                        processed_count += 1
-                        tasks.update_task(
-                            task_id,
-                            progress=processed_count,
-                            message=f"Synced Spotify ({processed_count}/50)...",
-                        )
-            except Exception as exc:
-                print(f"Spotify history error: {exc}")
-
-        db.commit()
-        result = {"message": f"Successfully synced {added_history_count} new play history records."}
-        tasks.update_task(task_id, status="completed", message="History sync complete!", progress=50, result=result)
-
-    except Exception as exc:
-        db.rollback()
-        tasks.update_task(task_id, status="failed", error=str(exc))
-    finally:
-        db.close()
-
-
-# --- In-Memory Global Caches for Backend Worker ---
-# In a true multi-worker production environment, use Redis for this.
-# This prevents querying APIs for the exact same Title/Artist across different users or playlist imports.
+# --- High Performance Multi-Threaded Enrichment ---
 GLOBAL_URI_CACHE = {}
 GLOBAL_LYRICS_CACHE = {}
 
 def _enrich_library_task(task_id: str, user_id: int, include_lyrics: bool = False):
     import concurrent.futures
-    from datetime import datetime, timedelta
+    from datetime import datetime
     from app.services.ytmusic import YTMusicService
     
     db = SessionLocal()
@@ -661,9 +441,8 @@ def _enrich_library_task(task_id: str, user_id: int, include_lyrics: bool = Fals
             return
 
         total_tracks = len(tracks)
-        tasks.update_task(task_id, total=total_tracks, message=f"Starting High-Speed Bridge...")
+        tasks.update_task(task_id, total=total_tracks, message="Starting High-Speed Bridge...")
 
-        # Initialize Services ONCE outside the loop to save massive overhead
         spotify_service = SpotifyService()
         spotify_client = None
         if user.spotify_access_token:
@@ -671,60 +450,56 @@ def _enrich_library_task(task_id: str, user_id: int, include_lyrics: bool = Fals
                 spotify_client = spotify_service.get_valid_client(user, db)
             except Exception: pass
             
-        yt_auth_path = None
         from app.api.integrations import get_ytmusic_browser_auth_path
-        path = get_ytmusic_browser_auth_path()
-        if os.path.exists(path):
-            yt_auth_path = path
-            
+        yt_auth_path = get_ytmusic_browser_auth_path()
+        if not os.path.exists(yt_auth_path):
+            yt_auth_path = None
         yt_service = YTMusicService(yt_auth_path)
 
         processed_count = 0
         enriched_count = 0
         
-        def process_track(track):
-            """Stable synchronous worker for a single track."""
-            has_new = False
+        def process_track_thread(t_data):
+            res = {"spotify_uri": None, "matched_youtube_id": None, "lyrics": None}
             try:
-                # 1. Spotify Match
-                if spotify_client and not track.spotify_uri:
-                    uri = spotify_service.search_and_match_track(spotify_client, track)
-                    if uri:
-                        track.spotify_uri = uri
-                        has_new = True
+                if spotify_client and not t_data.get("spotify_uri"):
+                    uri = spotify_service.search_and_match_track(spotify_client, type('obj', (object,), t_data))
+                    if uri: res["spotify_uri"] = uri
                 
-                # 2. YouTube Match
-                if not track.matched_youtube_id and track.source == "spotify":
-                    yt_id = yt_service.search_and_match_track(track.title, track.artist, track.duration_ms)
-                    if yt_id:
-                        track.matched_youtube_id = yt_id
-                        has_new = True
+                if not t_data.get("matched_youtube_id") and t_data.get("source") == "spotify":
+                    yt_id = yt_service.search_and_match_track(t_data['title'], t_data['artist'], t_data.get('duration_ms'))
+                    if yt_id: res["matched_youtube_id"] = yt_id
 
-                # 3. Lyrics
-                if include_lyrics and not track.lyrics:
-                    lyrics = LyricsService.fetch_lyrics(track.title, track.artist, track.album, track.duration_ms)
-                    if lyrics:
-                        track.lyrics = lyrics
-                        has_new = True
+                if include_lyrics and not t_data.get("lyrics"):
+                    lyrics = LyricsService.fetch_lyrics(t_data['title'], t_data['artist'], t_data.get('album'), t_data.get('duration_ms'))
+                    if lyrics: res["lyrics"] = lyrics
             except Exception as e:
-                print(f"Error enriching track {track.id}: {e}")
-            
-            # Always mark as attempted
-            track.last_enriched_at = datetime.utcnow()
-            return has_new
+                print(f"Worker thread error: {e}")
+            return res
 
-        # Use 5 parallel workers for stability
         with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
             chunk_size = 10
             for i in range(0, total_tracks, chunk_size):
                 chunk = tracks[i : i + chunk_size]
+                chunk_data = [
+                    {
+                        "title": t.title, "artist": t.artist, "album": t.album, 
+                        "duration_ms": t.duration_ms, "spotify_uri": t.spotify_uri,
+                        "matched_youtube_id": t.matched_youtube_id, "lyrics": t.lyrics,
+                        "source": t.source
+                    } for t in chunk
+                ]
                 
-                futures = {executor.submit(process_track, t): t for t in chunk}
+                futures = {executor.submit(process_track_thread, d): idx for idx, d in enumerate(chunk_data)}
                 for future in concurrent.futures.as_completed(futures):
-                    if future.result():
-                        enriched_count += 1
+                    idx = futures[future]
+                    result = future.result()
+                    t = chunk[idx]
+                    if result.get("spotify_uri"): t.spotify_uri = result["spotify_uri"]; enriched_count += 1
+                    if result.get("matched_youtube_id"): t.matched_youtube_id = result["matched_youtube_id"]; enriched_count += 1
+                    if result.get("lyrics"): t.lyrics = result["lyrics"]; enriched_count += 1
+                    t.last_enriched_at = datetime.utcnow()
                 
-                # Bulk DNA
                 if spotify_client:
                     matched_in_chunk = [t for t in chunk if t.spotify_uri and t.bpm is None]
                     if matched_in_chunk:
@@ -779,115 +554,95 @@ def sync_history(
     return {"task_id": task_id, "message": "History sync started in background"}
 
 
+def _sync_history_task(task_id: str, user_id: int):
+    db = SessionLocal()
+    try:
+        user = db.query(schema.User).filter(schema.User.id == user_id).first()
+        if not user:
+            tasks.update_task(task_id, status="failed", error="User not found")
+            return
+
+        tasks.update_task(task_id, total=50, message="Syncing listening history...")
+        added_history_count = 0
+        processed_count = 0
+
+        def get_or_create_track(title, artist, ext_id=None, source=None):
+            t = None
+            if ext_id:
+                t = db.query(schema.Track).filter(schema.Track.owner_id == user.id, schema.Track.external_id == ext_id).first()
+            if not t:
+                t = db.query(schema.Track).filter(schema.Track.owner_id == user.id, schema.Track.title == title, schema.Track.artist == artist).first()
+            if not t:
+                t = schema.Track(title=title, artist=artist, external_id=ext_id, source=source or "history", owner_id=user.id)
+                db.add(t); db.flush()
+            return t
+
+        if user.spotify_access_token:
+            spotify_service = SpotifyService()
+            try:
+                spotify_client = spotify_service.get_valid_client(user, db)
+                history = spotify_service.get_recently_played_history(spotify_client, limit=50)
+                if history and "items" in history:
+                    for item in history["items"]:
+                        track_data = item.get("track", {})
+                        played_at_str = item.get("played_at")
+                        if not track_data or not played_at_str: continue
+                        try:
+                            played_at = datetime.fromisoformat(played_at_str.replace('Z', '+00:00')).replace(tzinfo=None)
+                        except: played_at = datetime.utcnow()
+                        ext_id = track_data.get("id")
+                        uri = track_data.get("uri")
+                        title = track_data.get("name")
+                        artists = ", ".join([a.get("name") for a in track_data.get("artists", [])])
+                        t = get_or_create_track(title, artists, ext_id, "spotify")
+                        if uri and not t.spotify_uri: t.spotify_uri = uri
+                        existing_hist = db.query(schema.PlayHistory).filter(schema.PlayHistory.owner_id == user.id, schema.PlayHistory.track_id == t.id, schema.PlayHistory.played_at == played_at).first()
+                        if not existing_hist:
+                            db.add(schema.PlayHistory(owner_id=user.id, track_id=t.id, played_at=played_at, platform="spotify"))
+                            added_history_count += 1
+                        processed_count += 1
+                        tasks.update_task(task_id, progress=processed_count, message=f"Synced Spotify ({processed_count}/50)...")
+            except Exception as e: print(f"Spotify history error: {e}")
+        db.commit()
+        tasks.update_task(task_id, status="completed", message=f"Synced {added_history_count} records.", progress=50)
+    except Exception as e:
+        db.rollback(); tasks.update_task(task_id, status="failed", error=str(e))
+    finally: db.close()
+
 def _sync_spotify_library_task(task_id: str, user_id: int):
     db = SessionLocal()
     try:
         user = db.query(schema.User).filter(schema.User.id == user_id).first()
-        if not user or not user.spotify_access_token:
-            tasks.update_task(task_id, status="failed", error="Spotify not connected")
-            return
-
         spotify_service = SpotifyService()
         client = spotify_service.get_valid_client(user, db)
-
-        tasks.update_task(task_id, status="running", message="Fetching Spotify library...")
-
+        tasks.update_task(task_id, status="running", message="Scanning Liked Songs...")
         first_page = spotify_service.get_library_tracks(client, limit=1)
-        if not first_page:
-            tasks.update_task(task_id, status="completed", message="Library is empty.")
-            return
-
+        if not first_page: tasks.update_task(task_id, status="completed", message="Library empty."); return
         total_tracks = first_page.get("total", 0)
         tasks.update_task(task_id, total=total_tracks, message=f"Syncing {total_tracks} tracks...")
-
-        processed_count = 0
-        added_count = 0
-
-        limit = 50
+        processed_count = 0; added_count = 0; limit = 50
         for offset in range(0, total_tracks, limit):
             page = spotify_service.get_library_tracks(client, limit=limit, offset=offset)
-            if not page:
-                break
-
-            items = page.get("items", [])
-            for item in items:
+            if not page: break
+            for item in page.get("items", []):
                 track_data = item.get("track", {})
-                if not track_data:
-                    continue
-
+                if not track_data: continue
                 title = track_data.get("name")
                 artists = ", ".join([a.get("name") for a in track_data.get("artists", [])])
-                album_data = track_data.get("album", {})
-                album_name = album_data.get("name")
-                duration_ms = track_data.get("duration_ms")
                 ext_id = track_data.get("id")
-                uri = track_data.get("uri")
-
-                thumbnails = album_data.get("images", [])
-                thumb_url = thumbnails[0].get("url") if thumbnails else None
-
-                t = (
-                    db.query(schema.Track)
-                    .filter(schema.Track.owner_id == user.id, schema.Track.external_id == ext_id)
-                    .first()
-                )
-
+                t = db.query(schema.Track).filter(schema.Track.owner_id == user.id, schema.Track.external_id == ext_id).first()
                 if not t:
-                    t = schema.Track(
-                        title=title,
-                        artist=artists,
-                        album=album_name,
-                        duration_ms=duration_ms,
-                        thumbnail_url=thumb_url,
-                        spotify_uri=uri,
-                        external_id=ext_id,
-                        source="spotify",
-                        owner_id=user.id,
-                        release_year=album_data.get("release_date", "")[:4] if album_data.get("release_date") else None,
-                        popularity=track_data.get("popularity"),
-                    )
-                    t.genre = AnalysisEngine.classify_genre(t)
-                    t.mood = AnalysisEngine.classify_mood(t)
-                    db.add(t)
-                    added_count += 1
-                else:
-                    if not t.spotify_uri:
-                        t.spotify_uri = uri
-                    if not t.thumbnail_url:
-                        t.thumbnail_url = thumb_url
-
+                    t = schema.Track(title=title, artist=artists, album=track_data.get("album", {}).get("name"), duration_ms=track_data.get("duration_ms"), thumbnail_url=track_data.get("album", {}).get("images", [{}])[0].get("url"), spotify_uri=track_data.get("uri"), external_id=ext_id, source="spotify", owner_id=user.id, release_year=track_data.get("album", {}).get("release_date", "")[:4])
+                    db.add(t); added_count += 1
                 processed_count += 1
-                if processed_count % 10 == 0 or processed_count == total_tracks:
-                    tasks.update_task(
-                        task_id,
-                        progress=processed_count,
-                        message=f"Syncing Spotify ({processed_count}/{total_tracks})...",
-                    )
-
+                if processed_count % 10 == 0: tasks.update_task(task_id, progress=processed_count)
             db.commit()
-
-        result = {"message": f"Successfully synced {added_count} new tracks from Spotify."}
-        tasks.update_task(
-            task_id,
-            status="completed",
-            message="Spotify sync complete!",
-            progress=total_tracks,
-            result=result,
-        )
-
-    except Exception as exc:
-        db.rollback()
-        tasks.update_task(task_id, status="failed", error=str(exc))
-    finally:
-        db.close()
-
+        tasks.update_task(task_id, status="completed", message=f"Synced {added_count} new tracks.")
+    except Exception as e: db.rollback(); tasks.update_task(task_id, status="failed", error=str(e))
+    finally: db.close()
 
 @router.post("/sync-spotify")
-def sync_spotify_library(
-    background_tasks: BackgroundTasks,
-    current_user: schema.User = Depends(get_current_user),
-):
-    """Starts a background task to sync the entire Spotify Liked Songs library."""
+def sync_spotify_library(background_tasks: BackgroundTasks, current_user: schema.User = Depends(get_current_user)):
     task_id = tasks.create_task("Spotify Library Sync")
     background_tasks.add_task(_sync_spotify_library_task, task_id, current_user.id)
-    return {"task_id": task_id, "message": "Spotify sync started in background"}
+    return {"task_id": task_id}

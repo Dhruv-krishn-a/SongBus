@@ -2,12 +2,13 @@ import os
 import json
 import re
 import requests
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
-from app.core.database import get_db
+from app.core.database import get_db, SessionLocal
 from app.models import schema
 from app.api.deps import get_current_user
+from app.core import tasks
 from app.services.spotify import SpotifyService
 from datetime import datetime, timedelta
 from urllib.parse import quote
@@ -282,3 +283,97 @@ def get_integration_status(current_user: schema.User = Depends(get_current_user)
         "spotify_connected": bool(current_user.spotify_access_token),
         "youtube_connected": bool(current_user.yt_access_token)
     }
+
+@router.get("/spotify/playlists")
+def get_spotify_playlists(
+    current_user: schema.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    if not current_user.spotify_access_token:
+        raise HTTPException(status_code=400, detail="Spotify not connected")
+    
+    spotify_service = SpotifyService()
+    client = spotify_service.get_valid_client(current_user, db)
+    playlists_data = spotify_service.get_user_playlists(client)
+    
+    if not playlists_data:
+        return {"playlists": []}
+        
+    playlists = []
+    for item in playlists_data.get("items", []):
+        playlists.append({
+            "id": item.get("id"),
+            "title": item.get("name"),
+            "track_count": item.get("tracks", {}).get("total", 0),
+            "source": "spotify"
+        })
+    return {"playlists": playlists}
+
+def _import_spotify_playlist_task(task_id: str, user_id: int, playlist_id: str):
+    db = SessionLocal()
+    try:
+        user = db.query(schema.User).filter(schema.User.id == user_id).first()
+        spotify_service = SpotifyService()
+        client = spotify_service.get_valid_client(user, db)
+        
+        tasks.update_task(task_id, status="running", message="Fetching playlist details...")
+        
+        # Get tracks
+        all_tracks = []
+        limit = 100
+        offset = 0
+        while True:
+            page = spotify_service.get_playlist_tracks(client, playlist_id, limit=limit, offset=offset)
+            if not page or not page.get("items"): break
+            all_tracks.extend(page["items"])
+            if len(page["items"]) < limit: break
+            offset += limit
+
+        total = len(all_tracks)
+        tasks.update_task(task_id, total=total, message=f"Importing {total} tracks...")
+        
+        imported = 0
+        for item in all_tracks:
+            track_data = item.get("track")
+            if not track_data: continue
+            
+            title = track_data.get("name")
+            artists = ", ".join([a.get("name") for a in track_data.get("artists", [])])
+            ext_id = track_data.get("id")
+            
+            t = db.query(schema.Track).filter(schema.Track.owner_id == user.id, schema.Track.external_id == ext_id).first()
+            if not t:
+                # Add images safely
+                thumb = None
+                if track_data.get("album", {}).get("images"):
+                    thumb = track_data["album"]["images"][0].get("url")
+
+                t = schema.Track(
+                    title=title, artist=artists, external_id=ext_id, source="spotify", 
+                    owner_id=user.id, spotify_uri=track_data.get("uri"),
+                    duration_ms=track_data.get("duration_ms"),
+                    thumbnail_url=thumb,
+                    album=track_data.get("album", {}).get("name")
+                )
+                db.add(t)
+            
+            imported += 1
+            if imported % 10 == 0:
+                tasks.update_task(task_id, progress=imported)
+        
+        db.commit()
+        tasks.update_task(task_id, status="completed", message=f"Successfully imported {imported} tracks.")
+    except Exception as e:
+        tasks.update_task(task_id, status="failed", error=str(e))
+    finally:
+        db.close()
+
+@router.post("/spotify/import-playlist/{playlist_id}")
+def import_spotify_playlist(
+    playlist_id: str,
+    background_tasks: BackgroundTasks,
+    current_user: schema.User = Depends(get_current_user)
+):
+    task_id = tasks.create_task("Spotify Playlist Import")
+    background_tasks.add_task(_import_spotify_playlist_task, task_id, current_user.id, playlist_id)
+    return {"task_id": task_id}
