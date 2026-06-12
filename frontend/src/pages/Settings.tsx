@@ -100,79 +100,54 @@ export default function Settings() {
   const handleEnrichLibrary = async () => {
     if (!token) return;
     setTaskRunning(true);
-    setEnrichProgress({ message: 'Fetching pending tracks...', progress: 0, total: 100, active: true });
+    setEnrichProgress({ message: 'Starting job...', progress: 0, total: 100, active: true });
 
     try {
-      // 1. Get all pending track IDs
-      const pendingRes = await fetch('/api/music/enrich/pending', {
-        headers: { Authorization: `Bearer ${token}` }
+      const res = await fetch('/api/music/enrich-all', {
+        method: 'POST',
+        headers: { 
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}` 
+        },
+        body: JSON.stringify({ include_lyrics: false }) // Prioritize cheap wins (Spotify DNA)
       });
-      const pendingData = await pendingRes.json();
-      
-      if (!pendingRes.ok) throw new Error(pendingData.detail || 'Failed to fetch pending tracks');
-      
-      const trackIds: number[] = pendingData.track_ids || [];
-      const totalTracks = trackIds.length;
-      
-      if (totalTracks === 0) {
+      const data = await res.json();
+      if (res.ok && data.task_id) {
+        pollTask(data.task_id);
+      } else {
         setTaskRunning(false);
         setEnrichProgress(null);
-        setModal({ show: true, type: 'info', title: 'Already Up to Date', message: 'All your tracks are already fully enriched with lyrics and Spotify DNA.' });
-        return;
+        setModal({ show: true, type: 'error', title: 'Failed to Start', message: data.detail || 'Could not start enrichment.' });
       }
-
-      setEnrichProgress({ message: `Starting batch process...`, progress: 0, total: totalTracks, active: true });
-
-      // 2. Process in chunks
-      const chunkSize = 50; // Process 50 tracks per API call
-      let processedCount = 0;
-      let totalEnriched = 0;
-
-      for (let i = 0; i < totalTracks; i += chunkSize) {
-        const chunk = trackIds.slice(i, i + chunkSize);
-        
-        try {
-          const chunkRes = await fetch('/api/music/enrich/chunk', {
-            method: 'POST',
-            headers: { 
-              'Content-Type': 'application/json',
-              Authorization: `Bearer ${token}` 
-            },
-            body: JSON.stringify({ track_ids: chunk })
-          });
-          
-          if (!chunkRes.ok) {
-            console.error(`Chunk failed: ${await chunkRes.text()}`);
-            // Don't break completely, try to continue with the next chunk
-            continue; 
-          }
-          
-          const chunkData = await chunkRes.json();
-          totalEnriched += chunkData.enriched_count || 0;
-          
-        } catch (err) {
-          console.error(`Chunk request error:`, err);
-        }
-
-        processedCount += chunk.length;
-        setEnrichProgress({ 
-          message: `Enriching via Serverless Sync...`, 
-          progress: processedCount, 
-          total: totalTracks, 
-          active: true 
-        });
-      }
-
-      // 3. Complete
+    } catch (err: any) {
       setTaskRunning(false);
       setEnrichProgress(null);
-      setModal({ 
-        show: true, 
-        type: 'success', 
-        title: 'Enrichment Complete', 
-        message: `Successfully processed ${processedCount} tracks and enriched ${totalEnriched} with new deep data.` 
-      });
+      setModal({ show: true, type: 'error', title: 'Error', message: err.message });
+    }
+  };
 
+  const handleFetchLyrics = async () => {
+    if (!token) return;
+    setTaskRunning(true);
+    setEnrichProgress({ message: 'Starting lyrics fetch...', progress: 0, total: 100, active: true });
+
+    try {
+      const res = await fetch('/api/music/enrich-all', {
+        method: 'POST',
+        headers: { 
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}` 
+        },
+        body: JSON.stringify({ include_lyrics: true })
+      });
+      const data = await res.json();
+      if (res.ok && data.task_id) {
+        pollTask(data.task_id);
+      } else {
+        setTaskRunning(false);
+        setEnrichProgress(null);
+        setModal({ show: true, type: 'error', title: 'Failed to Start', message: data.detail || 'Could not start enrichment.' });
+      }
     } catch (err: any) {
       setTaskRunning(false);
       setEnrichProgress(null);
@@ -405,7 +380,7 @@ export default function Settings() {
             </div>
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
             <button 
               onClick={handleEnrichLibrary}
               disabled={taskRunning || enrichProgress?.active}
@@ -421,11 +396,27 @@ export default function Settings() {
                 {enrichProgress?.active ? <RefreshCw className="w-5 h-5 animate-spin" /> : <Sparkles className="w-5 h-5" />}
               </div>
               <div className="text-left w-full overflow-hidden">
-                <p className="font-bold text-gray-900 truncate">{enrichProgress?.active ? 'Enriching Library...' : 'Enrich Library'}</p>
+                <p className="font-bold text-gray-900 truncate">{enrichProgress?.active ? 'Enriching Library...' : 'Spotify DNA'}</p>
                 <p className="text-[10px] font-black text-gray-400 uppercase tracking-widest leading-none mt-1 truncate">
                   {enrichProgress?.active 
                     ? `${enrichProgress.progress} / ${enrichProgress.total} Tracks` 
-                    : 'BPM, Energy & Lyrics'}
+                    : 'BPM & Energy'}
+                </p>
+              </div>
+            </button>
+
+            <button 
+              onClick={handleFetchLyrics}
+              disabled={taskRunning || enrichProgress?.active}
+              className="flex items-center justify-center gap-3 p-6 rounded-2xl bg-gray-50 hover:bg-primary/5 border border-gray-100 group transition-all disabled:opacity-50 relative overflow-hidden text-left"
+            >
+              <div className="w-10 h-10 bg-white rounded-xl shadow-sm flex items-center justify-center text-purple-500 group-hover:scale-110 transition-transform flex-shrink-0">
+                <Music2 className="w-5 h-5" />
+              </div>
+              <div className="text-left w-full overflow-hidden">
+                <p className="font-bold text-gray-900 truncate">Fetch Lyrics</p>
+                <p className="text-[10px] font-black text-gray-400 uppercase tracking-widest leading-none mt-1 truncate">
+                  Regional & Global
                 </p>
               </div>
             </button>
