@@ -27,6 +27,7 @@ type Track = {
   valence?: number | null;
   lyrics?: string | null;
   spotify_uri?: string | null;
+  last_enriched_at?: string | null;
 };
 
 type YouTubePlaylist = {
@@ -262,7 +263,7 @@ const Library = () => {
           message: task.message + (task.total ? ` (${task.progress} / ${task.total})` : '')
         });
 
-        setTimeout(poll, 1500);
+        setTimeout(poll, 3000);
       } catch (err) {
         console.error('Polling error:', err);
         setImporting(false);
@@ -361,7 +362,7 @@ const Library = () => {
           return;
         }
         setModal({ show: true, type: 'info', title: 'Analyzing...', message: task.message + (task.total ? ` (${task.progress} / ${task.total})` : '') });
-        setTimeout(poll, 1500);
+        setTimeout(poll, 3000);
       } catch (err) { setIsClassifyingAi(false); }
     };
     poll();
@@ -596,7 +597,19 @@ const Library = () => {
               <div className="flex flex-col min-h-[400px]">
                 <div className="flex items-center gap-3 mb-6"><Mic className="w-5 h-5 text-gray-400" /><h4 className="text-sm font-black text-gray-900 uppercase tracking-[0.2em]">Lyrics</h4></div>
                 <div className="flex-1 bg-gray-50 rounded-[32px] p-8 border border-gray-100 overflow-y-auto">
-                  {selectedTrack.lyrics ? <pre className="text-sm font-bold text-gray-600 leading-relaxed whitespace-pre-wrap font-sans">{selectedTrack.lyrics}</pre> : <div className="h-full flex flex-col items-center justify-center text-center opacity-30"><Loader2 className="w-10 h-10 animate-spin mb-4" /><p className="text-xs font-black uppercase">Searching regional databases...</p></div>}
+                  {selectedTrack.lyrics ? (
+                    <pre className="text-sm font-bold text-gray-600 leading-relaxed whitespace-pre-wrap font-sans">{selectedTrack.lyrics}</pre>
+                  ) : selectedTrack.last_enriched_at ? (
+                    <div className="h-full flex flex-col items-center justify-center text-center opacity-40 text-gray-500">
+                       <Mic className="w-10 h-10 mb-4 opacity-50" />
+                       <p className="text-xs font-black uppercase">No lyrics found for this track</p>
+                    </div>
+                  ) : (
+                    <div className="h-full flex flex-col items-center justify-center text-center opacity-30">
+                      <Loader2 className="w-10 h-10 animate-spin mb-4" />
+                      <p className="text-xs font-black uppercase">Pending enrichment...</p>
+                    </div>
+                  )}
                 </div>
               </div>
             </div>

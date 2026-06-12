@@ -638,6 +638,7 @@ def _enrich_library_task(task_id: str, user_id: int, include_lyrics: bool = Fals
 async def _enrich_library_task_async(task_id: str, user_id: int, include_lyrics: bool):
     import httpx
     import asyncio
+    from datetime import datetime, timedelta
     
     db = SessionLocal()
     try:
@@ -647,18 +648,19 @@ async def _enrich_library_task_async(task_id: str, user_id: int, include_lyrics:
             return
 
         # BUDGET & PRIORITIZATION:
-        # Instead of doing 1,500 at once, we set a strict limit of 200 tracks per job.
-        # We prioritize cheap wins: Tracks missing Spotify DNA (BPM/Energy).
-        # We intentionally use `is_(None)` as it translates correctly in SQLAlchemy.
         budget_limit = 200
         
+        # Don't try again if we tried within the last 7 days
+        seven_days_ago = datetime.utcnow() - timedelta(days=7)
+        enrich_condition = (schema.Track.last_enriched_at.is_(None)) | (schema.Track.last_enriched_at < seven_days_ago)
+
         filter_condition = (schema.Track.bpm.is_(None)) | (schema.Track.spotify_uri.is_(None))
         if include_lyrics:
              filter_condition = filter_condition | (schema.Track.lyrics.is_(None))
 
         tracks = (
             db.query(schema.Track)
-            .filter(schema.Track.owner_id == user_id, filter_condition)
+            .filter(schema.Track.owner_id == user_id, filter_condition, enrich_condition)
             .limit(budget_limit)
             .all()
         )
@@ -675,7 +677,6 @@ async def _enrich_library_task_async(task_id: str, user_id: int, include_lyrics:
         if user.spotify_access_token:
             spotify_service = SpotifyService()
             try:
-                # Refresh token if needed
                 client = spotify_service.get_valid_client(user, db)
                 spotify_token = client._auth
             except Exception as exc:
@@ -683,9 +684,9 @@ async def _enrich_library_task_async(task_id: str, user_id: int, include_lyrics:
 
         processed_count = 0
         enriched_count = 0
-        chunk_size = 50 # Process in manageable batches of 50 to avoid any timeouts
+        chunk_size = 25 # Smaller chunks = faster DB saves and UI updates
         
-        # Concurrency limit to prevent overwhelming APIs
+        # Safe Concurrency
         semaphore = asyncio.Semaphore(15) 
 
         async def process_single_track(client: httpx.AsyncClient, track):
@@ -693,20 +694,20 @@ async def _enrich_library_task_async(task_id: str, user_id: int, include_lyrics:
             cache_key = f"{track.title.lower()}_{track.artist.lower()}"
             
             async with semaphore:
-                # 1. Spotify Match (Check Cache First)
+                # 1. Spotify Match
                 if spotify_token and not track.spotify_uri:
                     if cache_key in GLOBAL_URI_CACHE:
-                        if GLOBAL_URI_CACHE[cache_key]: # None means we already searched and failed
+                        if GLOBAL_URI_CACHE[cache_key]:
                             track.spotify_uri = GLOBAL_URI_CACHE[cache_key]
                             has_new_data = True
                     else:
                         uri = await spotify_service.async_search_and_match_track(client, spotify_token, track)
-                        GLOBAL_URI_CACHE[cache_key] = uri # Cache result (even if None, so we don't retry)
+                        GLOBAL_URI_CACHE[cache_key] = uri
                         if uri:
                             track.spotify_uri = uri
                             has_new_data = True
                 
-                # 2. Lyrics (Optional, Check Cache First)
+                # 2. Lyrics
                 if include_lyrics and not track.lyrics:
                     if cache_key in GLOBAL_LYRICS_CACHE:
                         if GLOBAL_LYRICS_CACHE[cache_key]:
@@ -725,7 +726,6 @@ async def _enrich_library_task_async(task_id: str, user_id: int, include_lyrics:
                 chunk = tracks[i : i + chunk_size]
                 chunk_touched = False
 
-                # Launch async requests for lyrics and spotify match
                 coroutines = [process_single_track(client, t) for t in chunk]
                 results = await asyncio.gather(*coroutines, return_exceptions=True)
                 
@@ -755,11 +755,15 @@ async def _enrich_library_task_async(task_id: str, user_id: int, include_lyrics:
                                     track.valence = f.get("valence")
                                     chunk_touched = True
 
+                # Mark all as attempted regardless of success
+                for t in chunk:
+                    t.last_enriched_at = datetime.utcnow()
+
                 processed_count += len(chunk)
                 tasks.update_task(
                     task_id,
                     progress=processed_count,
-                    message=f"Processing chunk ({processed_count}/{total_tracks})...",
+                    message=f"Enriching chunk ({processed_count}/{total_tracks})...",
                 )
                 db.commit()
 

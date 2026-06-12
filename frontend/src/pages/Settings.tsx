@@ -88,7 +88,7 @@ export default function Settings() {
           message: task.message + (task.total ? ` (${task.progress} / ${task.total})` : '')
         });
 
-        setTimeout(poll, 1500);
+        setTimeout(poll, 3000);
       } catch (err) {
         console.error('Polling error:', err);
         setTaskRunning(false);

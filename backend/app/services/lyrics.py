@@ -54,7 +54,7 @@ class LyricsService:
                 if album:
                     params["album_name"] = LyricsService._clean_string(album)
                 
-                response = await client.get(f"{LyricsService.BASE_URL}/get", params=params)
+                response = await client.get(f"{LyricsService.BASE_URL}/get", params=params, headers=LyricsService.HEADERS)
                 if response.status_code == 200:
                     data = response.json()
                     if data.get("instrumental"): return "Instrumental"
@@ -64,7 +64,7 @@ class LyricsService:
             search_query = f"{clean_title} {clean_artist}"
             encoded_query = urllib.parse.quote(search_query)
             
-            response = await client.get(f"{LyricsService.BASE_URL}/search?q={encoded_query}")
+            response = await client.get(f"{LyricsService.BASE_URL}/search?q={encoded_query}", headers=LyricsService.HEADERS)
             
             if response.status_code == 200:
                 results = response.json()
@@ -86,7 +86,7 @@ class LyricsService:
             
             # --- STAGE 3: Recursive Regional Fallback ---
             if "various" in artist.lower():
-                response = await client.get(f"{LyricsService.BASE_URL}/search?q={encoded_query}")
+                response = await client.get(f"{LyricsService.BASE_URL}/search?q={encoded_query}", headers=LyricsService.HEADERS)
                 if response.status_code == 200:
                     results = response.json()
                     if results: return results[0].get("syncedLyrics") or results[0].get("plainLyrics")

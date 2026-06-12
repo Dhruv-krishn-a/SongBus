@@ -61,6 +61,7 @@ class Track(Base):
     release_year = Column(String, nullable=True)
     explicit = Column(Boolean, default=False)
     lyrics = Column(String, nullable=True)
+    last_enriched_at = Column(DateTime, nullable=True)
     
     owner_id = Column(Integer, ForeignKey("users.id"))
     created_at = Column(DateTime, default=datetime.utcnow)
