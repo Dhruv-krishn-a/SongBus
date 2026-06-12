@@ -115,6 +115,56 @@ class AnalysisEngine:
         }
 
     @staticmethod
+    def parse_semantic_query(prompt: str) -> dict:
+        """
+        Translates a natural language user prompt into a structured JSON filter object
+        that the database can execute.
+        """
+        api_key = os.getenv("GEMINI_API_KEY")
+        if not api_key:
+            return {"error": "AI API Key not configured"}
+
+        system_prompt = f"""
+        You are an AI DJ mapping user intent to database parameters.
+        The user will provide a prompt describing the kind of playlist they want.
+        Translate their intent into the following strict JSON format. Only include the keys you are confident in filtering by.
+        Do NOT wrap in markdown ticks.
+        
+        Valid Keys:
+        - "bpm_min" (integer, e.g., 120 for workout, 60 for chill)
+        - "bpm_max" (integer, e.g., 160)
+        - "energy_min" (float 0.0 to 1.0, e.g., 0.8 for hype)
+        - "energy_max" (float 0.0 to 1.0)
+        - "danceability_min" (float 0.0 to 1.0)
+        - "valence_min" (float 0.0 to 1.0, high is happy)
+        - "valence_max" (float 0.0 to 1.0, low is sad/dark)
+        - "genres" (array of strings, e.g., ["Pop", "Rock", "Electronic/Remix"])
+        - "moods" (array of strings, e.g., ["Energetic/Party", "Chill/Relaxed", "Sad/Emotional"])
+        
+        User Prompt: "{prompt}"
+        """
+
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
+        payload = {
+            "contents": [{"parts": [{"text": system_prompt}]}],
+            "generationConfig": {"response_mime_type": "application/json"}
+        }
+
+        import requests
+        import json
+        try:
+            response = requests.post(url, json=payload, timeout=10)
+            if response.status_code == 200:
+                content = response.json()['candidates'][0]['content']['parts'][0]['text']
+                import re
+                content = re.sub(r'```(?:json)?', '', content).strip()
+                return json.loads(content)
+            return {"error": "Failed to generate filters."}
+        except Exception as e:
+            print(f"AI Parse Error: {e}")
+            return {"error": str(e)}
+
+    @staticmethod
     def get_ai_insights(tracks: List[Track]) -> dict:
         """
         Uses Gemini AI to analyze the library and provide deep insights.

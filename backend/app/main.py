@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.api import auth, music, integrations, youtube, playlists, tasks
+from app.api import auth, music, integrations, youtube, playlists, tasks, transport
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -31,6 +31,7 @@ app.include_router(playlists.router, prefix="/api/music", tags=["playlists_extra
 app.include_router(integrations.router, prefix="/api/integrations", tags=["integrations"])
 app.include_router(youtube.router, prefix="/api/integrations", tags=["youtube"])
 app.include_router(tasks.router, prefix="/api/tasks", tags=["tasks"])
+app.include_router(transport.router, prefix="/api/transport", tags=["transport"])
 
 @app.get("/")
 def read_root():

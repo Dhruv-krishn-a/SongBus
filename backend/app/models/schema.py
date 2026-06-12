@@ -49,6 +49,7 @@ class Track(Base):
     language = Column(String, nullable=True)
     thumbnail_url = Column(String, nullable=True)
     spotify_uri = Column(String, nullable=True)
+    matched_youtube_id = Column(String, nullable=True)
     external_id = Column(String, nullable=True) # YT/Spotify ID
     source = Column(String) # e.g., "youtube"
     

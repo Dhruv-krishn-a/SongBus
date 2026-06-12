@@ -7,6 +7,8 @@ import Settings from './pages/Settings';
 import SpotifyCallback from './pages/SpotifyCallback';
 import YouTubeCallback from './pages/YouTubeCallback';
 import Playlists from './pages/Playlists';
+import Transport from './pages/Transport';
+import SmartPlaylists from './pages/SmartPlaylists';
 import { AuthProvider } from './context/AuthContext';
 import ProtectedRoute from './components/ProtectedRoute';
 
@@ -24,6 +26,8 @@ function App() {
               <Route index element={<Dashboard />} />
               <Route path="library" element={<Library />} />
               <Route path="playlists" element={<Playlists />} />
+              <Route path="transport" element={<Transport />} />
+              <Route path="ai-dj" element={<SmartPlaylists />} />
               <Route path="settings" element={<Settings />} />
             </Route>
           </Route>

@@ -693,8 +693,35 @@ async def _enrich_library_task_async(task_id: str, user_id: int, include_lyrics:
             has_new_data = False
             cache_key = f"{track.title.lower()}_{track.artist.lower()}"
             
+            # --- GLOBAL DATABASE CACHE (Stateless Scaling) ---
+            # Check if ANY track in the entire DB (from any user) already has this data.
+            # This is much faster than an API call and works across serverless restarts.
+            cached_track = db.query(schema.Track).filter(
+                schema.Track.title == track.title,
+                schema.Track.artist == track.artist,
+                (schema.Track.bpm.is_not(None)) | (schema.Track.lyrics.is_not(None))
+            ).first()
+
+            if cached_track:
+                if not track.bpm and cached_track.bpm:
+                    track.bpm = cached_track.bpm
+                    track.energy = cached_track.energy
+                    track.danceability = cached_track.danceability
+                    track.valence = cached_track.valence
+                    has_new_data = True
+                if not track.lyrics and cached_track.lyrics:
+                    track.lyrics = cached_track.lyrics
+                    has_new_data = True
+                if not track.spotify_uri and cached_track.spotify_uri:
+                    track.spotify_uri = cached_track.spotify_uri
+                    has_new_data = True
+                
+                # If we filled everything from cache, we can return early and save an API call
+                if track.bpm and track.lyrics and track.spotify_uri:
+                    return has_new_data
+
             async with semaphore:
-                # 1. Spotify Match
+                # 1. Spotify Match (Check RAM Cache first, then API)
                 if spotify_token and not track.spotify_uri:
                     if cache_key in GLOBAL_URI_CACHE:
                         if GLOBAL_URI_CACHE[cache_key]:

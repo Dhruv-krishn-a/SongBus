@@ -212,3 +212,23 @@ class SpotifyService:
         except Exception as e:
             print(f"Spotify Library Error: {e}")
             return None
+
+    def get_user_playlists(self, client: spotipy.Spotify, limit: int = 50, offset: int = 0):
+        """
+        Fetches a page of the user's playlists.
+        """
+        try:
+            return client.current_user_playlists(limit=limit, offset=offset)
+        except Exception as e:
+            print(f"Spotify Playlists Error: {e}")
+            return None
+
+    def get_playlist_tracks(self, client: spotipy.Spotify, playlist_id: str, limit: int = 100, offset: int = 0):
+        """
+        Fetches tracks for a specific playlist.
+        """
+        try:
+            return client.playlist_items(playlist_id=playlist_id, limit=limit, offset=offset)
+        except Exception as e:
+            print(f"Spotify Playlist Tracks Error: {e}")
+            return None

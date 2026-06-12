@@ -3,9 +3,71 @@ from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.models import schema
 from app.api.deps import get_current_user
+from app.services.analysis import AnalysisEngine
 from app.services.spotify import SpotifyService
+from pydantic import BaseModel
 
 router = APIRouter()
+
+class AIGenerateRequest(BaseModel):
+    prompt: str
+
+@router.post("/ai-generate")
+def ai_generate_playlist(
+    request: AIGenerateRequest, 
+    current_user: schema.User = Depends(get_current_user), 
+    db: Session = Depends(get_db)
+):
+    """
+    Translates user prompt into a SQL query using Gemini to build a Smart Playlist.
+    """
+    filters = AnalysisEngine.parse_semantic_query(request.prompt)
+    if "error" in filters:
+        raise HTTPException(status_code=500, detail=filters["error"])
+        
+    query = db.query(schema.Track).filter(schema.Track.owner_id == current_user.id)
+    
+    # Apply JSON filters mapped by AI
+    if filters.get("bpm_min"):
+        query = query.filter(schema.Track.bpm >= filters["bpm_min"])
+    if filters.get("bpm_max"):
+        query = query.filter(schema.Track.bpm <= filters["bpm_max"])
+    if filters.get("energy_min"):
+        query = query.filter(schema.Track.energy >= filters["energy_min"])
+    if filters.get("energy_max"):
+        query = query.filter(schema.Track.energy <= filters["energy_max"])
+    if filters.get("danceability_min"):
+        query = query.filter(schema.Track.danceability >= filters["danceability_min"])
+    if filters.get("valence_min"):
+        query = query.filter(schema.Track.valence >= filters["valence_min"])
+    if filters.get("valence_max"):
+        query = query.filter(schema.Track.valence <= filters["valence_max"])
+    if filters.get("genres"):
+        query = query.filter(schema.Track.genre.in_(filters["genres"]))
+    if filters.get("moods"):
+        query = query.filter(schema.Track.mood.in_(filters["moods"]))
+        
+    tracks = query.limit(50).all()
+    
+    if not tracks:
+        return {"tracks": [], "filters_applied": filters, "message": "No tracks matched this vibe."}
+        
+    return {
+        "tracks": [
+            {
+                "id": t.id, 
+                "title": t.title, 
+                "artist": t.artist, 
+                "thumbnail_url": t.thumbnail_url,
+                "genre": t.genre,
+                "mood": t.mood,
+                "bpm": t.bpm,
+                "energy": t.energy
+            } for t in tracks
+        ],
+        "filters_applied": filters,
+        "message": f"Generated a {len(tracks)}-track mix!"
+    }
 
 @router.post("/generate-playlists")
 def generate_smart_playlists(current_user: schema.User = Depends(get_current_user), db: Session = Depends(get_db)):

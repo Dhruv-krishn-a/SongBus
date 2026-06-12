@@ -116,9 +116,18 @@ const Library = () => {
     const saved = localStorage.getItem('yt_playlists');
     return saved ? JSON.parse(saved) : [];
   });
+  const [spotifyPlaylists, setSpotifyPlaylists] = useState<YouTubePlaylist[]>(() => {
+    const saved = localStorage.getItem('sp_playlists');
+    return saved ? JSON.parse(saved) : [];
+  });
+  
   const [playlistsLoading, setPlaylistsLoading] = useState(false);
+  
   const [selectedPlaylistId, setSelectedPlaylistId] = useState(() => {
     return localStorage.getItem('yt_selected_id') || '';
+  });
+  const [selectedSpPlaylistId, setSelectedSpPlaylistId] = useState(() => {
+    return localStorage.getItem('sp_selected_id') || '';
   });
 
   // Debounce search input
@@ -171,6 +180,44 @@ const Library = () => {
       })
       .finally(() => setPlaylistsLoading(false));
   }, [token, status.youtube_connected]);
+
+  const fetchSpotifyPlaylists = useCallback(() => {
+    if (!token || !status.spotify_connected) return;
+
+    setPlaylistsLoading(true);
+    fetch('/api/integrations/spotify/playlists', {
+      headers: { Authorization: `Bearer ${token}` }
+    })
+      .then(async res => {
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || 'Failed to load Spotify playlists');
+        return data;
+      })
+      .then(data => {
+        const playlists = data.playlists || [];
+        setSpotifyPlaylists(playlists);
+        localStorage.setItem('sp_playlists', JSON.stringify(playlists));
+        if (playlists.length > 0) {
+          const firstId = playlists[0].id;
+          setSelectedSpPlaylistId(firstId);
+          localStorage.setItem('sp_selected_id', firstId);
+        }
+      })
+      .catch(err => {
+        setModal({
+          show: true,
+          type: 'error',
+          title: 'Connection Failed',
+          message: `We couldn't reach Spotify: ${err.message}.`
+        });
+      })
+      .finally(() => setPlaylistsLoading(false));
+  }, [token, status.spotify_connected]);
+
+  const handleSpPlaylistChange = (id: string) => {
+    setSelectedSpPlaylistId(id);
+    localStorage.setItem('sp_selected_id', id);
+  };
 
   const handlePlaylistChange = (id: string) => {
     setSelectedPlaylistId(id);
@@ -280,6 +327,26 @@ const Library = () => {
 
     try {
       const res = await fetch(`/api/integrations/youtube/import-playlist/${selectedPlaylistId}`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      const data = await res.json();
+      if (res.ok && data.task_id) pollTask(data.task_id);
+      else throw new Error(data.detail || 'Failed');
+    } catch (err: any) {
+      setImporting(false);
+      setModal({ show: true, type: 'error', title: 'Error', message: err.message });
+    }
+  };
+
+  const handleSpotifyImport = async () => {
+    if (!token || !selectedSpPlaylistId) return;
+
+    setImporting(true);
+    setModal({ show: true, type: 'info', title: 'Import Started', message: 'Connecting to Spotify...' });
+
+    try {
+      const res = await fetch(`/api/integrations/spotify/import-playlist/${selectedSpPlaylistId}`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${token}` }
       });
@@ -477,9 +544,27 @@ const Library = () => {
           )}
 
           {activeTab === 'spotify' && status.spotify_connected && (
-             <button onClick={handleSpotifySync} disabled={importing} className="flex-1 lg:flex-none flex items-center justify-center gap-2 bg-green-600 text-white px-8 py-3 rounded-2xl shadow-xl shadow-green-600/20 hover:bg-green-700 transition-all font-bold text-sm">
-                <Globe className="w-4 h-4" /> Sync Liked Songs
-             </button>
+             <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
+                <div className="flex-1 sm:flex-none flex items-stretch gap-2 bg-white p-1.5 rounded-2xl border border-gray-200 shadow-sm min-w-[300px]">
+                  {spotifyPlaylists.length === 0 ? (
+                    <button onClick={fetchSpotifyPlaylists} disabled={playlistsLoading} className="flex-1 flex items-center justify-center gap-2 py-2 text-sm font-black text-gray-400 hover:text-green-600 transition-colors"><RefreshCw className={`w-4 h-4 ${playlistsLoading ? 'animate-spin' : ''}`} /> Fetch Playlists</button>
+                  ) : (
+                    <div className="flex items-center gap-1 w-full min-w-0">
+                      <div className="flex-1 flex items-center px-2 min-w-0 bg-gray-50 rounded-xl h-10">
+                        <Globe className="w-4 h-4 text-green-600 mr-2 flex-shrink-0" />
+                        <select value={selectedSpPlaylistId} onChange={(e) => handleSpPlaylistChange(e.target.value)} className="bg-transparent text-[13px] font-bold focus:outline-none w-full truncate appearance-none">
+                          {spotifyPlaylists.map((p) => <option key={p.id} value={p.id}>{p.title} ({p.track_count})</option>)}
+                        </select>
+                      </div>
+                      <button onClick={handleSpotifyImport} className="bg-green-600 text-white px-5 h-10 rounded-xl text-[11px] font-black uppercase tracking-wider hover:bg-green-700">Scan</button>
+                      <button onClick={fetchSpotifyPlaylists} className="p-2.5 text-gray-400 hover:text-green-600 rounded-xl bg-gray-50"><RefreshCw className={`w-4 h-4 ${playlistsLoading ? 'animate-spin' : ''}`} /></button>
+                    </div>
+                  )}
+                </div>
+                <button onClick={handleSpotifySync} disabled={importing} className="flex-1 sm:flex-none flex items-center justify-center gap-2 bg-gray-900 text-white px-6 py-3 rounded-2xl shadow-xl shadow-gray-900/20 hover:bg-gray-800 transition-all font-bold text-sm">
+                   Sync Liked Songs
+                </button>
+             </div>
           )}
         </div>
       </header>
@@ -568,9 +653,22 @@ const Library = () => {
       <div className="flex items-center justify-between px-4 py-4">
         <div className="text-xs font-black text-gray-400 uppercase tracking-widest">{total} Total</div>
         <div className="flex items-center gap-2">
-          <button onClick={() => handlePageChange(Math.max(1, page - 1))} disabled={page <= 1} className="w-12 h-12 flex items-center justify-center rounded-2xl bg-white border border-gray-200 text-gray-600 disabled:opacity-20"><ChevronLeft className="w-5 h-5" /></button>
-          <div className="bg-gray-900 text-white px-6 h-12 flex items-center rounded-2xl font-black text-sm">{page} / {totalPages}</div>
-          <button onClick={() => handlePageChange(Math.min(totalPages, page + 1))} disabled={page >= totalPages} className="w-12 h-12 flex items-center justify-center rounded-2xl bg-white border border-gray-200 text-gray-600 disabled:opacity-20"><ChevronRight className="w-5 h-5" /></button>
+          <button onClick={() => handlePageChange(Math.max(1, page - 1))} disabled={page <= 1} className="w-12 h-12 flex items-center justify-center rounded-2xl bg-white border border-gray-200 text-gray-600 disabled:opacity-20 hover:shadow-md transition-all"><ChevronLeft className="w-5 h-5" /></button>
+          <div className="bg-gray-900 text-white px-4 h-12 flex items-center rounded-2xl font-black text-sm shadow-lg">
+            <input 
+              type="number" 
+              value={page}
+              onChange={(e) => {
+                 const val = parseInt(e.target.value);
+                 if (val > 0 && val <= totalPages) {
+                    handlePageChange(val);
+                 }
+              }}
+              className="bg-transparent w-8 text-center outline-none border-b border-gray-700 focus:border-white transition-colors hide-spin-button"
+            />
+            <span className="mx-2 opacity-50">/</span> {totalPages}
+          </div>
+          <button onClick={() => handlePageChange(Math.min(totalPages, page + 1))} disabled={page >= totalPages} className="w-12 h-12 flex items-center justify-center rounded-2xl bg-white border border-gray-200 text-gray-600 disabled:opacity-20 hover:shadow-md transition-all"><ChevronRight className="w-5 h-5" /></button>
         </div>
       </div>
 

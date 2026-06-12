@@ -121,7 +121,7 @@ class LyricsService:
                 if album:
                     params["album_name"] = LyricsService._clean_string(album)
                 
-                response = requests.get(f"{LyricsService.BASE_URL}/get", params=params, headers=LyricsService.HEADERS, timeout=15)
+                response = requests.get(f"{LyricsService.BASE_URL}/get", params=params, headers=LyricsService.HEADERS, timeout=5)
                 if response.status_code == 200:
                     data = response.json()
                     # We prefer Synced > Plain > Instrumental (None)
@@ -133,7 +133,7 @@ class LyricsService:
             search_query = f"{clean_title} {clean_artist}"
             encoded_query = urllib.parse.quote(search_query)
             
-            response = requests.get(f"{LyricsService.BASE_URL}/search?q={encoded_query}", headers=LyricsService.HEADERS, timeout=15)
+            response = requests.get(f"{LyricsService.BASE_URL}/search?q={encoded_query}", headers=LyricsService.HEADERS, timeout=5)
             
             if response.status_code == 200:
                 results = response.json()
@@ -159,7 +159,7 @@ class LyricsService:
             # Special logic for Pakistani/Indian songs where artists might be "Various" 
             # or the title might contain regional suffixes.
             if "various" in artist.lower():
-                response = requests.get(f"{LyricsService.BASE_URL}/search?q={encoded_query}", headers=LyricsService.HEADERS, timeout=15)
+                response = requests.get(f"{LyricsService.BASE_URL}/search?q={encoded_query}", headers=LyricsService.HEADERS, timeout=5)
                 if response.status_code == 200:
                     results = response.json()
                     if results: return results[0].get("syncedLyrics") or results[0].get("plainLyrics")

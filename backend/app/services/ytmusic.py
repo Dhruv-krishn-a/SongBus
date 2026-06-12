@@ -46,3 +46,22 @@ class YTMusicService:
             return self.client.get_playlist(playlistId=playlist_id)
         except Exception:
             return None
+
+    def search_and_match_track(self, title: str, artist: str, duration_ms: int = None):
+        """
+        Searches YouTube Music for a track and returns its videoId.
+        """
+        query = f"{title} {artist}"
+        try:
+            results = self.client.search(query, filter="songs", limit=5)
+            best_match = None
+            for res in results:
+                if duration_ms and res.get("duration_seconds"):
+                    duration_diff = abs((res["duration_seconds"] * 1000) - duration_ms)
+                    if duration_diff > 10000:
+                        continue
+                best_match = res.get("videoId")
+                break
+            return best_match
+        except Exception:
+            return None

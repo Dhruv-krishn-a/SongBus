@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Outlet, Link, useLocation } from 'react-router-dom';
-import { Home, Library, ListMusic, Settings, LogOut, Menu, X } from 'lucide-react';
+import { Home, Library, ListMusic, Settings, LogOut, Menu, X, ArrowRightLeft, Sparkles } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import Logo from './Logo';
 
@@ -12,7 +12,9 @@ const Layout = () => {
   const navigation = [
     { name: 'Dashboard', href: '/', icon: Home },
     { name: 'Library', href: '/library', icon: Library },
-    { name: 'Smart Playlists', href: '/playlists', icon: ListMusic },
+    { name: 'Transport Hub', href: '/transport', icon: ArrowRightLeft },
+    { name: 'Smart Mixes', href: '/playlists', icon: ListMusic },
+    { name: 'AI DJ', href: '/ai-dj', icon: Sparkles },
     { name: 'Settings', href: '/settings', icon: Settings },
   ];
 
