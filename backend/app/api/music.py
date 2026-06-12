@@ -647,152 +647,119 @@ async def _enrich_library_task_async(task_id: str, user_id: int, include_lyrics:
             tasks.update_task(task_id, status="failed", error="User not found")
             return
 
-        # BUDGET & PRIORITIZATION:
         budget_limit = 200
-        
-        # Don't try again if we tried within the last 7 days
         seven_days_ago = datetime.utcnow() - timedelta(days=7)
-        enrich_condition = (schema.Track.last_enriched_at.is_(None)) | (schema.Track.last_enriched_at < seven_days_ago)
-
-        filter_condition = (schema.Track.bpm.is_(None)) | (schema.Track.spotify_uri.is_(None))
-        if include_lyrics:
-             filter_condition = filter_condition | (schema.Track.lyrics.is_(None))
-
+        
         tracks = (
             db.query(schema.Track)
-            .filter(schema.Track.owner_id == user_id, filter_condition, enrich_condition)
+            .filter(schema.Track.owner_id == user_id)
+            .filter(
+                (schema.Track.last_enriched_at.is_(None)) | (schema.Track.last_enriched_at < seven_days_ago)
+            )
             .limit(budget_limit)
             .all()
         )
 
         if not tracks:
-            tasks.update_task(task_id, status="completed", message="All tracks are already enriched!", progress=0, total=0)
+            tasks.update_task(task_id, status="completed", message="Library already up to date!", progress=0, total=0)
             return
 
         total_tracks = len(tracks)
-        tasks.update_task(task_id, total=total_tracks, message=f"Starting backend job for {total_tracks} tracks...")
+        tasks.update_task(task_id, total=total_tracks, message=f"Starting High-Speed Bridge...")
 
-        spotify_service = None
         spotify_token = None
+        spotify_service = SpotifyService()
         if user.spotify_access_token:
-            spotify_service = SpotifyService()
             try:
                 client = spotify_service.get_valid_client(user, db)
                 spotify_token = client._auth
-            except Exception as exc:
-                print(f"Spotify client error: {exc}")
+            except Exception: pass
 
         processed_count = 0
         enriched_count = 0
-        chunk_size = 25 # Smaller chunks = faster DB saves and UI updates
-        
-        # Safe Concurrency
+        chunk_size = 10 # Small chunks for real-time progress
         semaphore = asyncio.Semaphore(15) 
 
-        async def process_single_track(client: httpx.AsyncClient, track):
-            has_new_data = False
-            cache_key = f"{track.title.lower()}_{track.artist.lower()}"
-            
-            # --- GLOBAL DATABASE CACHE (Stateless Scaling) ---
-            # Check if ANY track in the entire DB (from any user) already has this data.
-            # This is much faster than an API call and works across serverless restarts.
-            cached_track = db.query(schema.Track).filter(
-                schema.Track.title == track.title,
-                schema.Track.artist == track.artist,
-                (schema.Track.bpm.is_not(None)) | (schema.Track.lyrics.is_not(None))
-            ).first()
-
-            if cached_track:
-                if not track.bpm and cached_track.bpm:
-                    track.bpm = cached_track.bpm
-                    track.energy = cached_track.energy
-                    track.danceability = cached_track.danceability
-                    track.valence = cached_track.valence
-                    has_new_data = True
-                if not track.lyrics and cached_track.lyrics:
-                    track.lyrics = cached_track.lyrics
-                    has_new_data = True
-                if not track.spotify_uri and cached_track.spotify_uri:
-                    track.spotify_uri = cached_track.spotify_uri
-                    has_new_data = True
-                
-                # If we filled everything from cache, we can return early and save an API call
-                if track.bpm and track.lyrics and track.spotify_uri:
-                    return has_new_data
-
+        async def fetch_one(client: httpx.AsyncClient, t_dict: dict):
+            """Pure network-only worker. No DB access here."""
+            res = {"spotify_uri": None, "yt_id": None, "lyrics": None}
             async with semaphore:
-                # 1. Spotify Match (Check RAM Cache first, then API)
-                if spotify_token and not track.spotify_uri:
-                    if cache_key in GLOBAL_URI_CACHE:
-                        if GLOBAL_URI_CACHE[cache_key]:
-                            track.spotify_uri = GLOBAL_URI_CACHE[cache_key]
-                            has_new_data = True
-                    else:
-                        uri = await spotify_service.async_search_and_match_track(client, spotify_token, track)
-                        GLOBAL_URI_CACHE[cache_key] = uri
-                        if uri:
-                            track.spotify_uri = uri
-                            has_new_data = True
+                # 1. Spotify Match
+                if spotify_token and not t_dict.get("spotify_uri"):
+                    res["spotify_uri"] = await spotify_service.async_search_and_match_track(
+                        client, spotify_token, t_dict['title'], t_dict['artist'], t_dict.get('duration_ms')
+                    )
                 
-                # 2. Lyrics
-                if include_lyrics and not track.lyrics:
-                    if cache_key in GLOBAL_LYRICS_CACHE:
-                        if GLOBAL_LYRICS_CACHE[cache_key]:
-                            track.lyrics = GLOBAL_LYRICS_CACHE[cache_key]
-                            has_new_data = True
-                    else:
-                        lyrics = await LyricsService.async_fetch_lyrics(client, track.title, track.artist, track.album, track.duration_ms)
-                        GLOBAL_LYRICS_CACHE[cache_key] = lyrics
-                        if lyrics:
-                            track.lyrics = lyrics
-                            has_new_data = True
-            return has_new_data
+                # 2. YouTube Match
+                if not t_dict.get("matched_youtube_id") and t_dict.get("source") == "spotify":
+                    from app.services.ytmusic import YTMusicService
+                    yt = YTMusicService()
+                    # Run sync search in thread pool to not block async loop
+                    res["yt_id"] = await asyncio.get_event_loop().run_in_executor(
+                        None, yt.search_and_match_track, t_dict['title'], t_dict['artist'], t_dict.get('duration_ms')
+                    )
 
-        async with httpx.AsyncClient(timeout=20.0) as client:
+                # 3. Lyrics
+                if include_lyrics and not t_dict.get("lyrics"):
+                    res["lyrics"] = await LyricsService.async_fetch_lyrics(
+                        client, t_dict['title'], t_dict['artist'], t_dict.get('album'), t_dict.get('duration_ms')
+                    )
+            return res
+
+        async with httpx.AsyncClient(timeout=10.0, headers=LyricsService.HEADERS) as client:
             for i in range(0, total_tracks, chunk_size):
                 chunk = tracks[i : i + chunk_size]
-                chunk_touched = False
-
-                coroutines = [process_single_track(client, t) for t in chunk]
-                results = await asyncio.gather(*coroutines, return_exceptions=True)
                 
-                for r in results:
-                    if isinstance(r, bool) and r:
-                        chunk_touched = True
-                        enriched_count += 1
+                # Snapshot track data into dicts for thread safety
+                track_dicts = [
+                    {
+                        "title": t.title, "artist": t.artist, "album": t.album, 
+                        "duration_ms": t.duration_ms, "spotify_uri": t.spotify_uri,
+                        "matched_youtube_id": t.matched_youtube_id, "lyrics": t.lyrics,
+                        "source": t.source
+                    } for t in chunk
+                ]
 
-                # Bulk fetch Spotify DNA for the chunk
-                if spotify_token and spotify_service:
-                    uris_to_fetch = [t.spotify_uri for t in chunk if t.spotify_uri and not t.bpm]
-                    if uris_to_fetch:
-                        track_lookup = {t.spotify_uri: t for t in chunk if t.spotify_uri}
-                        try:
-                            features = await spotify_service.async_get_audio_features(client, spotify_token, uris_to_fetch)
-                        except Exception as exc:
-                            print(f"Spotify audio feature error: {exc}")
-                            features = []
+                # Run parallel requests for this chunk
+                coroutines = [fetch_one(client, d) for d in track_dicts]
+                chunk_results = await asyncio.gather(*coroutines, return_exceptions=True)
 
-                        for f in features or []:
-                            if f and isinstance(f, dict) and "uri" in f:
-                                track = track_lookup.get(f["uri"])
-                                if track:
-                                    track.bpm = f.get("tempo")
-                                    track.energy = f.get("energy")
-                                    track.danceability = f.get("danceability")
-                                    track.valence = f.get("valence")
-                                    chunk_touched = True
-
-                # Mark all as attempted regardless of success
-                for t in chunk:
+                # Apply results to ORM objects and DB (Main task thread)
+                for idx, r in enumerate(chunk_results):
+                    t = chunk[idx]
                     t.last_enriched_at = datetime.utcnow()
+                    if isinstance(r, dict):
+                        if r.get("spotify_uri"): t.spotify_uri = r["spotify_uri"]; enriched_count += 1
+                        if r.get("yt_id"): t.matched_youtube_id = r["yt_id"]; enriched_count += 1
+                        if r.get("lyrics"): t.lyrics = r["lyrics"]; enriched_count += 1
+
+                # Bulk Fetch DNA for matches
+                if spotify_token:
+                    uris = [t.spotify_uri for t in chunk if t.spotify_uri and t.bpm is None]
+                    if uris:
+                        track_map = {t.spotify_uri: t for t in chunk if t.spotify_uri}
+                        try:
+                            dna = await spotify_service.async_get_audio_features(client, spotify_token, uris)
+                            for f in dna or []:
+                                if f and f.get("uri") in track_map:
+                                    target = track_map[f["uri"]]
+                                    target.bpm = f.get("tempo")
+                                    target.energy = f.get("energy")
+                                    target.danceability = f.get("danceability")
+                                    target.valence = f.get("valence")
+                        except Exception: pass
 
                 processed_count += len(chunk)
-                tasks.update_task(
-                    task_id,
-                    progress=processed_count,
-                    message=f"Enriching chunk ({processed_count}/{total_tracks})...",
-                )
+                tasks.update_task(task_id, progress=processed_count, message=f"Building Bridge ({processed_count}/{total_tracks})...")
                 db.commit()
+
+        tasks.update_task(task_id, status="completed", message=f"Bridge build complete! Updated {enriched_count} tracks.", progress=total_tracks)
+
+    except Exception as exc:
+        db.rollback()
+        tasks.update_task(task_id, status="failed", error=str(exc))
+    finally:
+        db.close()
 
         result = {"message": f"Successfully enriched {enriched_count} tracks in this run."}
         tasks.update_task(

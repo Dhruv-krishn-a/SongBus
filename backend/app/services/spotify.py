@@ -110,12 +110,12 @@ class SpotifyService:
         except Exception:
             return False
 
-    async def async_search_and_match_track(self, client: httpx.AsyncClient, token: str, track: schema.Track):
+    async def async_search_and_match_track(self, client: httpx.AsyncClient, token: str, title: str, artist: str, duration_ms: int = None, existing_uri: str = None):
         """Async version of search and match using httpx."""
-        if track.spotify_uri:
-            return track.spotify_uri
+        if existing_uri:
+            return existing_uri
 
-        query = f"track:{track.title} artist:{track.artist}"
+        query = f"track:{title} artist:{artist}"
         try:
             response = await client.get(
                 "https://api.spotify.com/v1/search",
@@ -128,14 +128,14 @@ class SpotifyService:
                 
                 best_match = None
                 for cand in candidates:
-                    if track.duration_ms:
-                        duration_diff = abs(cand['duration_ms'] - track.duration_ms)
+                    if duration_ms:
+                        duration_diff = abs(cand['duration_ms'] - duration_ms)
                         if duration_diff > 10000:
                             continue
                     
                     title_lower = cand['name'].lower()
                     if "live" in title_lower or "karaoke" in title_lower:
-                        if "live" not in track.title.lower():
+                        if "live" not in title.lower():
                             continue
                     
                     best_match = cand['uri']

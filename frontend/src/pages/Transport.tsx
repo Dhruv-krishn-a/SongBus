@@ -183,16 +183,39 @@ export default function Transport() {
         </div>
 
         <div className="flex flex-col items-center md:items-end w-full md:w-auto gap-4">
-           <button 
-             onClick={handleAudit}
-             disabled={loading}
-             className="w-full md:w-auto px-10 h-14 bg-gray-900 text-white rounded-2xl font-black shadow-xl hover:bg-gray-800 transition-all flex items-center justify-center gap-2"
-           >
-             {loading ? <Loader2 className="w-5 h-5 animate-spin" /> : <RefreshCw className="w-5 h-5" />}
-             Run Audit
-           </button>
+           <div className="flex gap-2 w-full">
+             <button 
+               onClick={handleAudit}
+               disabled={loading}
+               className="flex-1 px-6 h-14 bg-gray-900 text-white rounded-2xl font-black shadow-xl hover:bg-gray-800 transition-all flex items-center justify-center gap-2"
+             >
+               {loading ? <Loader2 className="w-5 h-5 animate-spin" /> : <RefreshCw className="w-5 h-5" />}
+               Run Audit
+             </button>
+             <button 
+               onClick={async () => {
+                  if (!token) return;
+                  setLoading(true);
+                  try {
+                    const res = await fetch('/api/music/enrich-all', {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                      body: JSON.stringify({ include_lyrics: false })
+                    });
+                    const data = await res.json();
+                    if (res.ok && data.task_id) pollTask(data.task_id);
+                  } catch (err) { console.error(err); }
+                  finally { setLoading(false); }
+               }}
+               className="px-6 h-14 bg-primary text-white rounded-2xl font-black shadow-xl hover:bg-blue-600 transition-all flex items-center justify-center gap-2"
+               title="Find matching tracks on the destination platform"
+             >
+               <RefreshCw className="w-5 h-5" />
+               Build Bridge
+             </button>
+           </div>
            <p className="text-xs font-bold text-gray-400 text-center md:text-right">
-             Audits instantly against local database. <br/> Doesn't use API limits.
+             Audit checks for matches. Build Bridge finds them.
            </p>
         </div>
       </div>
