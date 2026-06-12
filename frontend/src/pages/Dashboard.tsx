@@ -6,9 +6,23 @@ import {
   Layers, Gauge, Loader2
 } from 'lucide-react';
 
+interface InsightsData {
+  total_tracks?: number;
+  top_artist?: string;
+  top_genre?: string;
+  genre_distribution?: Record<string, number>;
+}
+
+interface AiInsightsData {
+  personality?: string;
+  themes?: string[];
+  vibe_score?: number;
+  recommendation?: string;
+}
+
 const Dashboard = () => {
-  const [insights, setInsights] = useState<any>(null);
-  const [aiInsights, setAiInsights] = useState<any>(() => {
+  const [insights, setInsights] = useState<InsightsData | null>(null);
+  const [aiInsights, setAiInsights] = useState<AiInsightsData | null>(() => {
     const saved = localStorage.getItem('ai_insights');
     return saved ? JSON.parse(saved) : null;
   });
@@ -226,7 +240,7 @@ const Dashboard = () => {
           
           <div className="space-y-6">
             {insights?.genre_distribution ? (
-              Object.entries(insights.genre_distribution).slice(0, 4).map(([genre, count]: any) => (
+              Object.entries(insights.genre_distribution).slice(0, 4).map(([genre, count]) => (
                 <div key={genre} className="space-y-2">
                   <div className="flex justify-between text-xs font-black uppercase tracking-widest">
                     <span className="text-gray-900">{genre}</span>

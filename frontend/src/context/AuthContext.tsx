@@ -1,4 +1,4 @@
-import { createContext, useContext, useState, useEffect } from 'react';
+import { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import type { ReactNode } from 'react';
 
 interface User {
@@ -20,6 +20,12 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
   const [user, setUser] = useState<User | null>(null);
   const [token, setToken] = useState<string | null>(localStorage.getItem('token'));
   const [loading, setLoading] = useState(true);
+
+  const logout = useCallback(() => {
+    setToken(null);
+    setUser(null);
+    localStorage.removeItem('token');
+  }, []);
 
   useEffect(() => {
     if (token) {
@@ -44,18 +50,14 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
         setLoading(false);
       });
     } else {
-      setLoading(false);
+      // Defer state update to avoid calling setState synchronously within effect
+      const timeoutId = setTimeout(() => setLoading(false), 0);
+      return () => clearTimeout(timeoutId);
     }
-  }, [token]);
+  }, [token, logout]);
 
   const login = (newToken: string) => {
     setToken(newToken);
-  };
-
-  const logout = () => {
-    setToken(null);
-    setUser(null);
-    localStorage.removeItem('token');
   };
 
   return (

@@ -16,7 +16,7 @@ export default function Login() {
     const endpoint = isRegistering ? '/api/auth/register' : '/api/auth/login';
     
     try {
-      const response = await fetch(`http://localhost:8000${endpoint}`, {
+      const response = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email, password }),
@@ -42,8 +42,8 @@ export default function Login() {
       }
       
       navigate('/');
-    } catch (err: any) {
-      setError(err.message);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'An error occurred');
     }
   };
 

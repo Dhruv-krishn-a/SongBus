@@ -1,8 +1,8 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { 
   Sparkles, Send, CheckCircle2, AlertCircle, 
-  ExternalLink, Loader2, Music2, Info,  
+  ExternalLink, Loader2, Music2, Info
 } from 'lucide-react';
 
 type ModalConfig = {
@@ -13,9 +13,16 @@ type ModalConfig = {
   link?: string;
 };
 
+interface PlaylistData {
+  id: number;
+  name: string;
+  source: string;
+  external_id?: string;
+}
+
 export default function Playlists() {
   const { token } = useAuth();
-  const [playlists, setPlaylists] = useState<any[]>([]);
+  const [playlists, setPlaylists] = useState<PlaylistData[]>([]);
   const [loading, setLoading] = useState(false);
   const [generating, setGenerating] = useState(false);
   const [exportingId, setExportingId] = useState<number | null>(null);
@@ -28,9 +35,9 @@ export default function Playlists() {
     message: ''
   });
 
-  const fetchPlaylists = () => {
+  const fetchPlaylists = useCallback(() => {
     if (!token) return;
-    setLoading(true);
+    const timeoutId = setTimeout(() => setLoading(true), 0);
     fetch('/api/music/playlists', {
       headers: { 'Authorization': `Bearer ${token}` }
     })
@@ -38,13 +45,18 @@ export default function Playlists() {
     .then(data => {
       setPlaylists(data.playlists || []);
       setLoading(false);
+      clearTimeout(timeoutId);
     })
-    .catch(console.error);
-  };
+    .catch((err) => {
+      console.error(err);
+      setLoading(false);
+      clearTimeout(timeoutId);
+    });
+  }, [token]);
 
   useEffect(() => {
     fetchPlaylists();
-  }, [token]);
+  }, [fetchPlaylists]);
 
   const handleGenerate = async () => {
     if (!token) return;

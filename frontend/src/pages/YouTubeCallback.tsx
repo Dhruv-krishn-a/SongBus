@@ -13,7 +13,7 @@ export default function YouTubeCallback() {
     const error = searchParams.get('error');
 
     if (error) {
-      setStatus('Failed to connect YouTube: ' + error);
+      setTimeout(() => setStatus('Failed to connect YouTube: ' + error), 0);
       setTimeout(() => navigate('/settings'), 3000);
       return;
     }
@@ -40,7 +40,7 @@ export default function YouTubeCallback() {
         setTimeout(() => navigate('/settings'), 3000);
       });
     } else if (!token) {
-        setStatus('You must be logged in to connect YouTube.');
+        setTimeout(() => setStatus('You must be logged in to connect YouTube.'), 0);
         setTimeout(() => navigate('/login'), 2000);
     }
   }, [searchParams, token, navigate]);

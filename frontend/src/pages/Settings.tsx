@@ -1,8 +1,8 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useCallback } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { 
   ShieldAlert, Database, Trash2, CheckCircle2, 
-  AlertCircle, Info, Disc3, Music2, RefreshCw,  
+  AlertCircle, Info, Disc3, Music2, RefreshCw  
 } from 'lucide-react';
 
 type ModalConfig = {
@@ -30,18 +30,19 @@ export default function Settings() {
     message: ''
   });
 
-  const fetchStatus = () => {
+  const fetchStatus = useCallback(() => {
+    if (!token) return;
     fetch('/api/integrations/status', {
       headers: { Authorization: `Bearer ${token}` }
     })
     .then(res => res.json())
     .then(data => setStatus(data))
     .catch(console.error);
-  };
+  }, [token]);
 
   useEffect(() => {
     fetchStatus();
-  }, [token]);
+  }, [fetchStatus]);
 
   const handleSpotifyConnect = async () => {
     try {

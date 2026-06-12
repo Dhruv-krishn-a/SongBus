@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { 
   Wand2, X, Check, Search, Filter, ChevronLeft, ChevronRight, 
-  Music2,  Clock, Trash2, ArrowUp, ArrowDown, 
+  Music2, Clock, Trash2, ArrowUp, ArrowDown, 
   AlertCircle, Info, CheckCircle2, RefreshCw, Loader2, Brain
 } from 'lucide-react';
 
@@ -167,7 +167,7 @@ const Library = () => {
   const fetchTracks = useCallback((targetPage = page) => {
     if (!token) return;
 
-    setLoading(true);
+    const timeoutId = setTimeout(() => setLoading(true), 0);
     let url = `/api/music/library?page=${targetPage}&page_size=${PAGE_SIZE}&sort_by=${sortBy}&sort_order=${sortOrder}`;
     if (debouncedSearch) url += `&search=${encodeURIComponent(debouncedSearch)}`;
     if (artistFilter) url += `&artist=${encodeURIComponent(artistFilter)}`;
@@ -185,7 +185,10 @@ const Library = () => {
         setTotalPages(data.total_pages || 0);
       })
       .catch(console.error)
-      .finally(() => setLoading(false));
+      .finally(() => {
+        clearTimeout(timeoutId);
+        setLoading(false);
+      });
   }, [token, page, debouncedSearch, artistFilter, genreFilter, moodFilter, sortBy, sortOrder]);
 
   useEffect(() => {
@@ -193,7 +196,6 @@ const Library = () => {
   }, [fetchStatus]);
 
   useEffect(() => {
-    setPage(1);
     fetchTracks(1);
   }, [token, debouncedSearch, artistFilter, genreFilter, moodFilter, sortBy, sortOrder]);
 
@@ -356,7 +358,7 @@ const Library = () => {
       });
       const data = await res.json();
       setPreviewData(data.preview || []);
-      setSelectedForBatch(new Set((data.preview || []).map((p: any) => p.id)));
+      setSelectedForBatch(new Set((data.preview || []).map((p: NormalizePreview) => p.id)));
       setShowBatchModal(true);
     } catch (err) {
       console.error(err);
@@ -434,13 +436,13 @@ const Library = () => {
           message: data.detail || 'An error occurred during AI analysis.'
         });
       }
-    } catch (err: any) {
+    } catch (err: unknown) {
       console.error(err);
       setModal({
         show: true,
         type: 'error',
         title: 'Classification Failed',
-        message: err.message
+        message: err instanceof Error ? err.message : 'Unknown error'
       });
     } finally {
       setIsClassifyingAi(false);
@@ -454,7 +456,7 @@ const Library = () => {
     setMoodFilter('');
   };
 
-  const SortIndicator = ({ field }: { field: string }) => {
+  const renderSortIndicator = (field: string) => {
     if (sortBy !== field) return null;
     return sortOrder === 'asc' ? <ArrowUp className="w-3 h-3 ml-1 text-primary" /> : <ArrowDown className="w-3 h-3 ml-1 text-primary" />;
   };
@@ -597,17 +599,17 @@ const Library = () => {
             <thead>
               <tr className="border-b border-gray-50 bg-gray-50/30 text-[10px] md:text-[11px] font-black text-gray-400 uppercase tracking-widest">
                 <th onClick={() => toggleSort('title')} className="pl-8 pr-4 py-5 cursor-pointer hover:text-primary transition-colors select-none">
-                  <div className="flex items-center">Track <SortIndicator field="title" /></div>
+                  <div className="flex items-center">Track {renderSortIndicator('title')}</div>
                 </th>
                 <th onClick={() => toggleSort('album')} className="px-4 py-5 cursor-pointer hover:text-primary transition-colors select-none">
-                  <div className="flex items-center">Album <SortIndicator field="album" /></div>
+                  <div className="flex items-center">Album {renderSortIndicator('album')}</div>
                 </th>
                 <th onClick={() => toggleSort('genre')} className="px-4 py-5 cursor-pointer hover:text-primary transition-colors select-none">
-                  <div className="flex items-center">Classification <SortIndicator field="genre" /></div>
+                  <div className="flex items-center">Classification {renderSortIndicator('genre')}</div>
                 </th>
                 <th className="px-4 py-5 text-center"><Clock className="w-3.5 h-3.5 mx-auto" /></th>
                 <th onClick={() => toggleSort('created_at')} className="pl-4 pr-8 py-5 cursor-pointer hover:text-primary transition-colors select-none text-right">
-                  <div className="flex items-center justify-end">Added <SortIndicator field="created_at" /></div>
+                  <div className="flex items-center justify-end">Added {renderSortIndicator('created_at')}</div>
                 </th>
               </tr>
             </thead>

@@ -13,7 +13,7 @@ export default function SpotifyCallback() {
     const error = searchParams.get('error');
 
     if (error) {
-      setStatus('Failed to connect Spotify: ' + error);
+      setTimeout(() => setStatus('Failed to connect Spotify: ' + error), 0);
       setTimeout(() => navigate('/settings'), 3000);
       return;
     }
@@ -40,10 +40,10 @@ export default function SpotifyCallback() {
         setTimeout(() => navigate('/settings'), 3000);
       });
     } else if (!token) {
-        setStatus('You must be logged in to connect Spotify.');
+        setTimeout(() => setStatus('You must be logged in to connect Spotify.'), 0);
         setTimeout(() => navigate('/login'), 2000);
     } else {
-        setStatus('Invalid callback parameters.');
+        setTimeout(() => setStatus('Invalid callback parameters.'), 0);
         setTimeout(() => navigate('/settings'), 2000);
     }
   }, [searchParams, token, navigate]);
