@@ -332,18 +332,6 @@ Example: {{"1": {{"genre": "Pop", "mood": "Upbeat"}}, "2": {{"genre": "Rock", "m
         db.close()
 
 
-@router.post("/classify-all")
-def classify_all_tracks(
-    background_tasks: BackgroundTasks,
-    current_user: schema.User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    """Starts a background task to classify all imported tracks."""
-    task_id = tasks.create_task("AI Batch Classification")
-    background_tasks.add_task(_classify_all_task, task_id, current_user.id)
-    return {"task_id": task_id, "message": "Classification started in background"}
-
-
 @router.post("/normalize/batch")
 def batch_normalize(
     request: BatchNormalizeRequest,
@@ -411,11 +399,90 @@ def get_playlists(current_user: schema.User = Depends(get_current_user), db: Ses
 GLOBAL_URI_CACHE = {}
 GLOBAL_LYRICS_CACHE = {}
 
-def _enrich_library_task(task_id: str, user_id: int, include_lyrics: bool = False):
+def enrich_tracks_chunk(db: Session, tracks: List[schema.Track], user_id: int, include_lyrics: bool = False):
+    """
+    Core enrichment logic that matches tracks across platforms, 
+    fetches DNA (BPM/Energy), and retrieves lyrics.
+    """
     import concurrent.futures
-    from datetime import datetime
+    from app.api.integrations import get_ytmusic_browser_auth_path
     from app.services.ytmusic import YTMusicService
     
+    # 1. Initialize Services
+    spotify_service = SpotifyService()
+    spotify_client = None
+    user = db.query(schema.User).filter(schema.User.id == user_id).first()
+    
+    if user and user.spotify_access_token:
+        try:
+            spotify_client = spotify_service.get_valid_client(user, db)
+        except Exception: pass
+            
+    yt_auth_path = get_ytmusic_browser_auth_path()
+    if not os.path.exists(yt_auth_path):
+        yt_auth_path = None
+    yt_service = YTMusicService(yt_auth_path)
+
+    def process_track_thread(t_data):
+        res = {"spotify_uri": None, "matched_youtube_id": None, "lyrics": None}
+        try:
+            # 1. Spotify Match
+            if spotify_client and not t_data.get("spotify_uri"):
+                uri = spotify_service.search_and_match_track(spotify_client, type('obj', (object,), t_data))
+                if uri: res["spotify_uri"] = uri
+            
+            # 2. YouTube Match
+            if not t_data.get("matched_youtube_id") and t_data.get("source") == "spotify":
+                yt_id = yt_service.search_and_match_track(t_data['title'], t_data['artist'], t_data.get('duration_ms'))
+                if yt_id: res["matched_youtube_id"] = yt_id
+
+            # 3. Lyrics
+            if include_lyrics and not t_data.get("lyrics"):
+                lyrics = LyricsService.fetch_lyrics(t_data['title'], t_data['artist'], t_data.get('album'), t_data.get('duration_ms'))
+                if lyrics: res["lyrics"] = lyrics
+        except Exception: pass
+        return res
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+        track_data = [
+            {
+                "title": t.title, "artist": t.artist, "album": t.album, 
+                "duration_ms": t.duration_ms, "spotify_uri": t.spotify_uri,
+                "matched_youtube_id": t.matched_youtube_id, "lyrics": t.lyrics,
+                "source": t.source
+            } for t in tracks
+        ]
+        
+        futures = {executor.submit(process_track_thread, d): idx for idx, d in enumerate(track_data)}
+        for future in concurrent.futures.as_completed(futures):
+            idx = futures[future]
+            result = future.result()
+            t = tracks[idx]
+            if result.get("spotify_uri"): t.spotify_uri = result["spotify_uri"]
+            if result.get("matched_youtube_id"): t.matched_youtube_id = result["matched_youtube_id"]
+            if result.get("lyrics"): t.lyrics = result["lyrics"]
+            t.last_enriched_at = datetime.utcnow()
+        
+        # 2. Bulk DNA
+        if spotify_client:
+            matched_uris = [t.spotify_uri for t in tracks if t.spotify_uri and t.bpm is None]
+            if matched_uris:
+                track_map = {t.spotify_uri: t for t in tracks if t.spotify_uri}
+                try:
+                    features = spotify_service.get_audio_features(spotify_client, matched_uris)
+                    for f in features or []:
+                        if f and f.get("uri") in track_map:
+                            target = track_map[f["uri"]]
+                            target.bpm = f.get("tempo")
+                            target.energy = f.get("energy")
+                            target.danceability = f.get("danceability")
+                            target.valence = f.get("valence")
+                except Exception: pass
+    
+    db.commit()
+
+def _enrich_library_task(task_id: str, user_id: int, include_lyrics: bool = False):
+    from datetime import datetime
     db = SessionLocal()
     try:
         user = db.query(schema.User).filter(schema.User.id == user_id).first()
@@ -441,86 +508,18 @@ def _enrich_library_task(task_id: str, user_id: int, include_lyrics: bool = Fals
             return
 
         total_tracks = len(tracks)
-        tasks.update_task(task_id, total=total_tracks, message="Starting High-Speed Bridge...")
+        tasks.update_task(task_id, total=total_tracks, message="Building Bridge...")
 
-        spotify_service = SpotifyService()
-        spotify_client = None
-        if user.spotify_access_token:
-            try:
-                spotify_client = spotify_service.get_valid_client(user, db)
-            except Exception: pass
-            
-        from app.api.integrations import get_ytmusic_browser_auth_path
-        yt_auth_path = get_ytmusic_browser_auth_path()
-        if not os.path.exists(yt_auth_path):
-            yt_auth_path = None
-        yt_service = YTMusicService(yt_auth_path)
+        # Process in batches of 10 for progress updates
+        processed = 0
+        chunk_size = 10
+        for i in range(0, total_tracks, chunk_size):
+            chunk = tracks[i : i + chunk_size]
+            enrich_tracks_chunk(db, chunk, user_id, include_lyrics=include_lyrics)
+            processed += len(chunk)
+            tasks.update_task(task_id, progress=processed)
 
-        processed_count = 0
-        enriched_count = 0
-        
-        def process_track_thread(t_data):
-            res = {"spotify_uri": None, "matched_youtube_id": None, "lyrics": None}
-            try:
-                if spotify_client and not t_data.get("spotify_uri"):
-                    uri = spotify_service.search_and_match_track(spotify_client, type('obj', (object,), t_data))
-                    if uri: res["spotify_uri"] = uri
-                
-                if not t_data.get("matched_youtube_id") and t_data.get("source") == "spotify":
-                    yt_id = yt_service.search_and_match_track(t_data['title'], t_data['artist'], t_data.get('duration_ms'))
-                    if yt_id: res["matched_youtube_id"] = yt_id
-
-                if include_lyrics and not t_data.get("lyrics"):
-                    lyrics = LyricsService.fetch_lyrics(t_data['title'], t_data['artist'], t_data.get('album'), t_data.get('duration_ms'))
-                    if lyrics: res["lyrics"] = lyrics
-            except Exception as e:
-                print(f"Worker thread error: {e}")
-            return res
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-            chunk_size = 10
-            for i in range(0, total_tracks, chunk_size):
-                chunk = tracks[i : i + chunk_size]
-                chunk_data = [
-                    {
-                        "title": t.title, "artist": t.artist, "album": t.album, 
-                        "duration_ms": t.duration_ms, "spotify_uri": t.spotify_uri,
-                        "matched_youtube_id": t.matched_youtube_id, "lyrics": t.lyrics,
-                        "source": t.source
-                    } for t in chunk
-                ]
-                
-                futures = {executor.submit(process_track_thread, d): idx for idx, d in enumerate(chunk_data)}
-                for future in concurrent.futures.as_completed(futures):
-                    idx = futures[future]
-                    result = future.result()
-                    t = chunk[idx]
-                    if result.get("spotify_uri"): t.spotify_uri = result["spotify_uri"]; enriched_count += 1
-                    if result.get("matched_youtube_id"): t.matched_youtube_id = result["matched_youtube_id"]; enriched_count += 1
-                    if result.get("lyrics"): t.lyrics = result["lyrics"]; enriched_count += 1
-                    t.last_enriched_at = datetime.utcnow()
-                
-                if spotify_client:
-                    matched_in_chunk = [t for t in chunk if t.spotify_uri and t.bpm is None]
-                    if matched_in_chunk:
-                        uris = [t.spotify_uri for t in matched_in_chunk]
-                        track_map = {t.spotify_uri: t for t in matched_in_chunk}
-                        try:
-                            features = spotify_service.get_audio_features(spotify_client, uris)
-                            for f in features or []:
-                                if f and f.get("uri") in track_map:
-                                    target = track_map[f["uri"]]
-                                    target.bpm = f.get("tempo")
-                                    target.energy = f.get("energy")
-                                    target.danceability = f.get("danceability")
-                                    target.valence = f.get("valence")
-                        except Exception: pass
-
-                processed_count += len(chunk)
-                tasks.update_task(task_id, progress=processed_count, message=f"Building Bridge ({processed_count}/{total_tracks})...")
-                db.commit()
-
-        tasks.update_task(task_id, status="completed", message=f"Bridge build complete! Updated {enriched_count} tracks.", progress=total_tracks)
+        tasks.update_task(task_id, status="completed", message="Bridge building complete!", progress=total_tracks)
 
     except Exception as exc:
         db.rollback()
@@ -528,12 +527,12 @@ def _enrich_library_task(task_id: str, user_id: int, include_lyrics: bool = Fals
     finally:
         db.close()
 
-class EnrichRequest(BaseModel):
+class EnrichAllRequest(BaseModel):
     include_lyrics: bool = False
 
 @router.post("/enrich-all")
 def enrich_all_tracks(
-    request: EnrichRequest,
+    request: EnrichAllRequest,
     background_tasks: BackgroundTasks,
     current_user: schema.User = Depends(get_current_user),
 ):
@@ -541,6 +540,17 @@ def enrich_all_tracks(
     task_id = tasks.create_task("Data Enrichment Job")
     background_tasks.add_task(_enrich_library_task, task_id, current_user.id, request.include_lyrics)
     return {"task_id": task_id, "message": "Enrichment worker queued"}
+
+
+@router.post("/classify-all")
+def classify_all_tracks(
+    background_tasks: BackgroundTasks,
+    current_user: schema.User = Depends(get_current_user),
+):
+    """Starts a dedicated background task to ONLY classify tracks using AI."""
+    task_id = tasks.create_task("AI Classification Job")
+    background_tasks.add_task(_classify_all_task, task_id, current_user.id)
+    return {"task_id": task_id, "message": "AI classification started"}
 
 
 @router.post("/sync-history")
@@ -624,6 +634,7 @@ def _sync_spotify_library_task(task_id: str, user_id: int):
         for offset in range(0, total_tracks, limit):
             page = spotify_service.get_library_tracks(client, limit=limit, offset=offset)
             if not page: break
+            current_batch = []
             for item in page.get("items", []):
                 track_data = item.get("track", {})
                 if not track_data: continue
@@ -634,8 +645,14 @@ def _sync_spotify_library_task(task_id: str, user_id: int):
                 if not t:
                     t = schema.Track(title=title, artist=artists, album=track_data.get("album", {}).get("name"), duration_ms=track_data.get("duration_ms"), thumbnail_url=track_data.get("album", {}).get("images", [{}])[0].get("url"), spotify_uri=track_data.get("uri"), external_id=ext_id, source="spotify", owner_id=user.id, release_year=track_data.get("album", {}).get("release_date", "")[:4])
                     db.add(t); added_count += 1
+                current_batch.append(t)
                 processed_count += 1
-                if processed_count % 10 == 0: tasks.update_task(task_id, progress=processed_count)
+            
+            # Deep Enrichment during import
+            if current_batch:
+                enrich_tracks_chunk(db, current_batch, user_id, include_lyrics=True)
+                
+            if processed_count % 10 == 0: tasks.update_task(task_id, progress=processed_count)
             db.commit()
         tasks.update_task(task_id, status="completed", message=f"Synced {added_count} new tracks.")
     except Exception as e: db.rollback(); tasks.update_task(task_id, status="failed", error=str(e))

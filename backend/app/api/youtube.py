@@ -5,6 +5,7 @@ from app.models import schema
 from app.api.deps import get_current_user
 from app.services.analysis import AnalysisEngine
 from app.core import tasks
+from app.api.music import enrich_tracks_chunk
 from ytmusicapi import YTMusic
 import os
 import re
@@ -440,6 +441,7 @@ def _import_playlist_task(task_id: str, playlist_id: str, user_id: int):
             processed_video_ids = set()
 
             tasks.update_task(task_id, total=len(items))
+            current_batch = []
 
             for item in items:
                 processed_count += 1
@@ -467,12 +469,22 @@ def _import_playlist_task(task_id: str, playlist_id: str, user_id: int):
                 )
                 if created:
                     imported_count += 1
+                
+                current_batch.append(track)
 
                 if getattr(track, "id", None) not in existing_links:
                     db.add(schema.PlaylistTrack(playlist_id=local_playlist.id, track=track))
                     if getattr(track, "id", None) is not None:
                         existing_links.add(track.id)
                     linked_count += 1
+
+                if len(current_batch) >= 20:
+                    enrich_tracks_chunk(db, current_batch, user_id, include_lyrics=True)
+                    current_batch = []
+                    db.flush()
+            
+            if current_batch:
+                enrich_tracks_chunk(db, current_batch, user_id, include_lyrics=True)
             db.flush()
 
         else:
@@ -494,6 +506,7 @@ def _import_playlist_task(task_id: str, playlist_id: str, user_id: int):
                     break
 
             tasks.update_task(task_id, total=len(all_items))
+            current_batch = []
 
             video_ids = []
             playlist_item_lookup = {}
@@ -546,12 +559,22 @@ def _import_playlist_task(task_id: str, playlist_id: str, user_id: int):
                 )
                 if created:
                     imported_count += 1
+                
+                current_batch.append(track)
 
                 if getattr(track, "id", None) not in existing_links:
                     db.add(schema.PlaylistTrack(playlist_id=local_playlist.id, track=track))
                     if getattr(track, "id", None) is not None:
                         existing_links.add(track.id)
                     linked_count += 1
+                
+                if len(current_batch) >= 20:
+                    enrich_tracks_chunk(db, current_batch, user_id, include_lyrics=True)
+                    current_batch = []
+                    db.flush()
+            
+            if current_batch:
+                enrich_tracks_chunk(db, current_batch, user_id, include_lyrics=True)
             db.flush()
 
         db.commit()

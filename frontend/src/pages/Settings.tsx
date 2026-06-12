@@ -3,7 +3,7 @@ import { useAuth } from '../context/AuthContext';
 import { 
   ShieldAlert, Database, Trash2, CheckCircle2, 
   AlertCircle, Info, Disc3, Music2, RefreshCw,
-  Sparkles, History
+  Sparkles, History, Brain, Mic
 } from 'lucide-react';
 
 type ModalConfig = {
@@ -53,44 +53,48 @@ export default function Settings() {
           headers: { Authorization: `Bearer ${token}` }
         });
         if (!res.ok) {
+           setEnrichProgress(null);
            setTaskRunning(false);
            return;
         }
         const task = await res.json();
 
         if (task.status === 'completed') {
+          setEnrichProgress(null);
+          setTaskRunning(false);
           setModal({
             show: true,
             type: 'success',
-            title: 'Job Complete',
+            title: task.name + ' Complete',
             message: task.result?.message || 'The task finished successfully.'
           });
-          setTaskRunning(false);
           return;
         }
 
         if (task.status === 'failed') {
+          setEnrichProgress(null);
+          setTaskRunning(false);
           setModal({
             show: true,
             type: 'error',
-            title: 'Job Failed',
-            message: task.error || 'Something went wrong during the background process.'
+            title: task.name + ' Failed',
+            message: task.error || 'Something went wrong.'
           });
-          setTaskRunning(false);
           return;
         }
 
-        // Show live progress
-        setModal({
-          show: true,
-          type: 'info',
-          title: task.name + ' in Progress',
-          message: task.message + (task.total ? ` (${task.progress} / ${task.total})` : '')
+        // Show live progress on button
+        setEnrichProgress({
+           message: task.message,
+           progress: task.progress,
+           total: task.total,
+           active: true
         });
 
         setTimeout(poll, 3000);
       } catch (err) {
         console.error('Polling error:', err);
+        setEnrichProgress(null);
         setTaskRunning(false);
       }
     };
@@ -147,6 +151,31 @@ export default function Settings() {
         setTaskRunning(false);
         setEnrichProgress(null);
         setModal({ show: true, type: 'error', title: 'Failed to Start', message: data.detail || 'Could not start enrichment.' });
+      }
+    } catch (err: any) {
+      setTaskRunning(false);
+      setEnrichProgress(null);
+      setModal({ show: true, type: 'error', title: 'Error', message: err.message });
+    }
+  };
+
+  const handleClassifyAi = async () => {
+    if (!token) return;
+    setTaskRunning(true);
+    setEnrichProgress({ message: 'Starting AI Job...', progress: 0, total: 100, active: true });
+
+    try {
+      const res = await fetch('/api/music/classify-all', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      const data = await res.json();
+      if (res.ok && data.task_id) {
+        pollTask(data.task_id);
+      } else {
+        setTaskRunning(false);
+        setEnrichProgress(null);
+        setModal({ show: true, type: 'error', title: 'Failed to Start', message: data.detail || 'Could not start AI classification.' });
       }
     } catch (err: any) {
       setTaskRunning(false);
@@ -380,7 +409,7 @@ export default function Settings() {
             </div>
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
             <button 
               onClick={handleEnrichLibrary}
               disabled={taskRunning || enrichProgress?.active}
@@ -396,11 +425,9 @@ export default function Settings() {
                 {enrichProgress?.active ? <RefreshCw className="w-5 h-5 animate-spin" /> : <Sparkles className="w-5 h-5" />}
               </div>
               <div className="text-left w-full overflow-hidden">
-                <p className="font-bold text-gray-900 truncate">{enrichProgress?.active ? 'Enriching Library...' : 'Spotify DNA'}</p>
+                <p className="font-bold text-gray-900 truncate">Spotify DNA</p>
                 <p className="text-[10px] font-black text-gray-400 uppercase tracking-widest leading-none mt-1 truncate">
-                  {enrichProgress?.active 
-                    ? `${enrichProgress.progress} / ${enrichProgress.total} Tracks` 
-                    : 'BPM & Energy'}
+                   BPM & Energy
                 </p>
               </div>
             </button>
@@ -408,10 +435,10 @@ export default function Settings() {
             <button 
               onClick={handleFetchLyrics}
               disabled={taskRunning || enrichProgress?.active}
-              className="flex items-center justify-center gap-3 p-6 rounded-2xl bg-gray-50 hover:bg-primary/5 border border-gray-100 group transition-all disabled:opacity-50 relative overflow-hidden text-left"
+              className="flex items-center justify-center gap-3 p-6 rounded-2xl bg-gray-50 hover:bg-purple-50 border border-gray-100 group transition-all disabled:opacity-50 relative overflow-hidden text-left"
             >
-              <div className="w-10 h-10 bg-white rounded-xl shadow-sm flex items-center justify-center text-purple-500 group-hover:scale-110 transition-transform flex-shrink-0">
-                <Music2 className="w-5 h-5" />
+              <div className="w-10 h-10 bg-white rounded-xl shadow-sm flex items-center justify-center text-purple-600 group-hover:scale-110 transition-transform flex-shrink-0">
+                <Mic className="w-5 h-5" />
               </div>
               <div className="text-left w-full overflow-hidden">
                 <p className="font-bold text-gray-900 truncate">Fetch Lyrics</p>
@@ -422,16 +449,34 @@ export default function Settings() {
             </button>
 
             <button 
+              onClick={handleClassifyAi}
+              disabled={taskRunning || enrichProgress?.active}
+              className="flex items-center justify-center gap-3 p-6 rounded-2xl bg-gray-50 hover:bg-orange-50 border border-gray-100 group transition-all disabled:opacity-50 relative overflow-hidden text-left"
+            >
+              <div className="w-10 h-10 bg-white rounded-xl shadow-sm flex items-center justify-center text-orange-500 group-hover:scale-110 transition-transform flex-shrink-0">
+                <Brain className="w-5 h-5" />
+              </div>
+              <div className="text-left w-full overflow-hidden">
+                <p className="font-bold text-gray-900 truncate">AI Classify</p>
+                <p className="text-[10px] font-black text-gray-400 uppercase tracking-widest leading-none mt-1 truncate">
+                  Gemini Insights
+                </p>
+              </div>
+            </button>
+
+            <button 
               onClick={handleSyncHistory}
               disabled={taskRunning}
               className="flex items-center justify-center gap-3 p-6 rounded-2xl bg-gray-50 hover:bg-blue-50 border border-gray-100 group transition-all disabled:opacity-50 text-left"
             >
-              <div className="w-10 h-10 bg-white rounded-xl shadow-sm flex items-center justify-center text-blue-600 group-hover:scale-110 transition-transform">
+              <div className="w-10 h-10 bg-white rounded-xl shadow-sm flex items-center justify-center text-blue-600 group-hover:scale-110 transition-transform flex-shrink-0">
                 <History className="w-5 h-5" />
               </div>
-              <div className="text-left">
-                <p className="font-bold text-gray-900">Sync History</p>
-                <p className="text-[10px] font-black text-gray-400 uppercase tracking-widest leading-none mt-1">Fetch Recent Activity</p>
+              <div className="text-left w-full overflow-hidden">
+                <p className="font-bold text-gray-900 truncate">Sync History</p>
+                <p className="text-[10px] font-black text-gray-400 uppercase tracking-widest leading-none mt-1 truncate">
+                   Recent Activity
+                </p>
               </div>
             </button>
           </div>

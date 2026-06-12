@@ -10,6 +10,7 @@ from app.models import schema
 from app.api.deps import get_current_user
 from app.core import tasks
 from app.services.spotify import SpotifyService
+from app.api.music import enrich_tracks_chunk
 from datetime import datetime, timedelta
 from urllib.parse import quote
 
@@ -333,35 +334,41 @@ def _import_spotify_playlist_task(task_id: str, user_id: int, playlist_id: str):
         tasks.update_task(task_id, total=total, message=f"Importing {total} tracks...")
         
         imported = 0
-        for item in all_tracks:
-            track_data = item.get("track")
-            if not track_data: continue
-            
-            title = track_data.get("name")
-            artists = ", ".join([a.get("name") for a in track_data.get("artists", [])])
-            ext_id = track_data.get("id")
-            
-            t = db.query(schema.Track).filter(schema.Track.owner_id == user.id, schema.Track.external_id == ext_id).first()
-            if not t:
-                # Add images safely
-                thumb = None
-                if track_data.get("album", {}).get("images"):
-                    thumb = track_data["album"]["images"][0].get("url")
+        chunk_size = 20
+        for i in range(0, total, chunk_size):
+            chunk = all_tracks[i:i+chunk_size]
+            current_batch = []
+            for item in chunk:
+                track_data = item.get("track")
+                if not track_data: continue
+                
+                title = track_data.get("name")
+                artists = ", ".join([a.get("name") for a in track_data.get("artists", [])])
+                ext_id = track_data.get("id")
+                
+                t = db.query(schema.Track).filter(schema.Track.owner_id == user.id, schema.Track.external_id == ext_id).first()
+                if not t:
+                    thumb = None
+                    if track_data.get("album", {}).get("images"):
+                        thumb = track_data["album"]["images"][0].get("url")
 
-                t = schema.Track(
-                    title=title, artist=artists, external_id=ext_id, source="spotify", 
-                    owner_id=user.id, spotify_uri=track_data.get("uri"),
-                    duration_ms=track_data.get("duration_ms"),
-                    thumbnail_url=thumb,
-                    album=track_data.get("album", {}).get("name")
-                )
-                db.add(t)
+                    t = schema.Track(
+                        title=title, artist=artists, external_id=ext_id, source="spotify", 
+                        owner_id=user.id, spotify_uri=track_data.get("uri"),
+                        duration_ms=track_data.get("duration_ms"),
+                        thumbnail_url=thumb,
+                        album=track_data.get("album", {}).get("name")
+                    )
+                    db.add(t)
+                current_batch.append(t)
+                imported += 1
             
-            imported += 1
-            if imported % 10 == 0:
-                tasks.update_task(task_id, progress=imported)
-        
-        db.commit()
+            # Deep Enrichment for this chunk
+            if current_batch:
+                enrich_tracks_chunk(db, current_batch, user_id, include_lyrics=True)
+                
+            tasks.update_task(task_id, progress=imported)
+            db.commit()
         tasks.update_task(task_id, status="completed", message=f"Successfully imported {imported} tracks.")
     except Exception as e:
         tasks.update_task(task_id, status="failed", error=str(e))
