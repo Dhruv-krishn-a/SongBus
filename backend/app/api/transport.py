@@ -93,11 +93,21 @@ def _export_job(task_id: str, user_id: int, track_ids: List[int], destination: s
                 tasks.update_task(task_id, progress=exported, message=f"Exported {exported}/{total}...")
                 
         elif destination == "youtube":
-            yt_service = YTMusicService(user.ytmusic_browser_auth)
+            from app.api.integrations import get_ytmusic_browser_auth_path
+            yt_auth_path = None
+            path = get_ytmusic_browser_auth_path()
+            if os.path.exists(path):
+                yt_auth_path = path
+                
+            yt_service = YTMusicService(yt_auth_path)
             # Actually, YTMusic API requires creating a playlist and adding videoIds.
             # We don't have the create playlist implemented fully yet, we can stub or implement it here.
             try:
-                playlist_id = yt_service.client.create_playlist(playlist_name, "Exported from SongBus")
+                playlist_id = yt_service.create_playlist(playlist_name, "Exported from SongBus")
+                if not playlist_id:
+                    tasks.update_task(task_id, status="failed", error="Could not create YouTube playlist")
+                    return
+                    
                 video_ids = [t.matched_youtube_id for t in tracks if t.matched_youtube_id]
                 for i in range(0, len(video_ids), 50):
                     batch = video_ids[i:i+50]

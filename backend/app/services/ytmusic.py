@@ -65,3 +65,12 @@ class YTMusicService:
             return best_match
         except Exception:
             return None
+
+    def create_playlist(self, name: str, description: str = ""):
+        """
+        Creates a new playlist on YouTube Music.
+        """
+        try:
+            return self.client.create_playlist(title=name, description=description)
+        except Exception:
+            return None

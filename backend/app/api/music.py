@@ -671,7 +671,13 @@ def _enrich_library_task(task_id: str, user_id: int, include_lyrics: bool = Fals
                 spotify_client = spotify_service.get_valid_client(user, db)
             except Exception: pass
             
-        yt_service = YTMusicService(user.ytmusic_browser_auth)
+        yt_auth_path = None
+        from app.api.integrations import get_ytmusic_browser_auth_path
+        path = get_ytmusic_browser_auth_path()
+        if os.path.exists(path):
+            yt_auth_path = path
+            
+        yt_service = YTMusicService(yt_auth_path)
 
         processed_count = 0
         enriched_count = 0
