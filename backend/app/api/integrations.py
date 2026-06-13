@@ -351,7 +351,7 @@ def _import_spotify_playlist_task(task_id: str, user_id: int, playlist_id: str):
         
         # Get tracks
         all_tracks = []
-        limit = 100
+        limit = 50
         offset = 0
         
         if playlist_id == "__liked_songs__":
