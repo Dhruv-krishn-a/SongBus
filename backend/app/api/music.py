@@ -577,9 +577,15 @@ def enrich_all_tracks(
     request: EnrichAllRequest,
     background_tasks: BackgroundTasks,
     current_user: schema.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
 ):
     """Starts a robust background worker task to enrich tracks. Has built-in budgets and caches."""
-    task_id = tasks.create_task("Data Enrichment Job")
+    active = tasks.get_active_tasks(current_user.id)
+    existing = next((t for t in active if t['name'] == "Data Enrichment Job"), None)
+    if existing:
+        return {"task_id": existing['id'], "message": "Enrichment already in progress"}
+
+    task_id = tasks.create_task("Data Enrichment Job", current_user.id)
     background_tasks.add_task(_enrich_library_task, task_id, current_user.id, request.include_lyrics)
     return {"task_id": task_id, "message": "Enrichment worker queued"}
 
@@ -588,9 +594,15 @@ def enrich_all_tracks(
 def classify_all_tracks(
     background_tasks: BackgroundTasks,
     current_user: schema.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
 ):
     """Starts a dedicated background task to ONLY classify tracks using AI."""
-    task_id = tasks.create_task("AI Classification Job")
+    active = tasks.get_active_tasks(current_user.id)
+    existing = next((t for t in active if t['name'] == "AI Classification Job"), None)
+    if existing:
+        return {"task_id": existing['id'], "message": "AI classification already in progress"}
+
+    task_id = tasks.create_task("AI Classification Job", current_user.id)
     background_tasks.add_task(_classify_all_task, task_id, current_user.id)
     return {"task_id": task_id, "message": "AI classification started"}
 
@@ -601,7 +613,7 @@ def sync_history(
     current_user: schema.User = Depends(get_current_user),
 ):
     """Starts a background task to sync play history from connected platforms."""
-    task_id = tasks.create_task("History Sync")
+    task_id = tasks.create_task("History Sync", current_user.id)
     background_tasks.add_task(_sync_history_task, task_id, current_user.id)
     return {"task_id": task_id, "message": "History sync started in background"}
 
@@ -774,6 +786,6 @@ def _sync_spotify_library_task(task_id: str, user_id: int):
 
 @router.post("/sync-spotify")
 def sync_spotify_library(background_tasks: BackgroundTasks, current_user: schema.User = Depends(get_current_user)):
-    task_id = tasks.create_task("Spotify Library Sync")
+    task_id = tasks.create_task("Spotify Library Sync", current_user.id)
     background_tasks.add_task(_sync_spotify_library_task, task_id, current_user.id)
     return {"task_id": task_id}

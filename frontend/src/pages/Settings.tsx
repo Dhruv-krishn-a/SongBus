@@ -44,7 +44,22 @@ export default function Settings() {
 
   useEffect(() => {
     fetchStatus();
-  }, [fetchStatus]);
+    
+    // Check for active background tasks on load
+    if (token) {
+      fetch('/api/tasks/active', {
+        headers: { Authorization: `Bearer ${token}` }
+      })
+      .then(res => res.json())
+      .then(data => {
+        if (data.tasks && data.tasks.length > 0) {
+           const mostRecent = data.tasks[0];
+           pollTask(mostRecent.id);
+        }
+      })
+      .catch(console.error);
+    }
+  }, [fetchStatus, token, pollTask]);
 
   const pollTask = useCallback(async (taskId: string) => {
     const poll = async () => {

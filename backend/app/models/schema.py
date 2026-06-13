@@ -21,6 +21,7 @@ class User(Base):
 
     playlists = relationship("Playlist", back_populates="owner")
     tracks = relationship("Track", back_populates="owner")
+    tasks = relationship("BackgroundTask", back_populates="owner")
 
 class Playlist(Base):
     __tablename__ = "playlists"
@@ -92,3 +93,21 @@ class PlayHistory(Base):
 
     owner = relationship("User")
     track = relationship("Track", back_populates="history")
+
+
+class BackgroundTask(Base):
+    __tablename__ = "background_tasks"
+
+    id = Column(String, primary_key=True, index=True) # UUID
+    name = Column(String)
+    status = Column(String, default="pending") # pending, running, completed, failed
+    progress = Column(Integer, default=0)
+    total = Column(Integer, default=0)
+    message = Column(String, nullable=True)
+    result = Column(String, nullable=True) # JSON string
+    error = Column(String, nullable=True)
+    owner_id = Column(Integer, ForeignKey("users.id"))
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    owner = relationship("User", back_populates="tasks")

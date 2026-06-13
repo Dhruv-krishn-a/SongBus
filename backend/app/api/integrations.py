@@ -433,8 +433,15 @@ def _import_spotify_playlist_task(task_id: str, user_id: int, playlist_id: str):
 def import_spotify_playlist(
     playlist_id: str,
     background_tasks: BackgroundTasks,
-    current_user: schema.User = Depends(get_current_user)
+    current_user: schema.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
 ):
-    task_id = tasks.create_task("Spotify Playlist Import")
+    # Check for already running task
+    active = tasks.get_active_tasks(current_user.id)
+    existing = next((t for t in active if t['name'] == "Spotify Playlist Import"), None)
+    if existing:
+        return {"task_id": existing['id'], "message": "Import already in progress"}
+
+    task_id = tasks.create_task("Spotify Playlist Import", current_user.id)
     background_tasks.add_task(_import_spotify_playlist_task, task_id, current_user.id, playlist_id)
     return {"task_id": task_id}

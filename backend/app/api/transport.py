@@ -134,6 +134,6 @@ def export_tracks(
     background_tasks: BackgroundTasks,
     current_user: schema.User = Depends(get_current_user)
 ):
-    task_id = tasks.create_task("Export Library")
+    task_id = tasks.create_task("Export Library", current_user.id)
     background_tasks.add_task(_export_job, task_id, current_user.id, request.track_ids, request.destination, request.playlist_name)
     return {"task_id": task_id, "message": "Export job queued"}

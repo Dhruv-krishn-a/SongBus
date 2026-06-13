@@ -620,8 +620,15 @@ def import_youtube_playlist(
     playlist_id: str,
     background_tasks: BackgroundTasks,
     current_user: schema.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
 ):
-    task_id = tasks.create_task(f"Import Playlist {playlist_id}")
+    # Check for already running task for this specific playlist
+    active = tasks.get_active_tasks(current_user.id)
+    existing = next((t for t in active if t['name'] == f"Import Playlist {playlist_id}"), None)
+    if existing:
+        return {"task_id": existing['id'], "message": "Import already in progress"}
+
+    task_id = tasks.create_task(f"Import Playlist {playlist_id}", current_user.id)
     background_tasks.add_task(_import_playlist_task, task_id, playlist_id, current_user.id)
     return {"task_id": task_id, "message": "Import started in background"}
 @router.post("/youtube/import")

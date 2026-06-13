@@ -1,46 +1,88 @@
-from typing import Dict, Any
+from typing import Dict, Any, List
 import uuid
+import json
 from datetime import datetime
+from app.core.database import SessionLocal
+from app.models import schema
 
-# Simple in-memory task registry
-# In a real production app with multiple workers, use Redis/Celery.
-_tasks: Dict[str, Dict[str, Any]] = {}
-
-def create_task(name: str, total: int = 0) -> str:
-    task_id = str(uuid.uuid4())
-    _tasks[task_id] = {
-        "id": task_id,
-        "name": name,
-        "status": "pending", # pending, running, completed, failed
-        "progress": 0,
-        "total": total,
-        "message": "Starting...",
-        "result": None,
-        "error": None,
-        "created_at": datetime.utcnow().isoformat(),
-        "updated_at": datetime.utcnow().isoformat(),
-    }
-    return task_id
+def create_task(name: str, user_id: int, total: int = 0) -> str:
+    db = SessionLocal()
+    try:
+        task_id = str(uuid.uuid4())
+        db_task = schema.BackgroundTask(
+            id=task_id,
+            name=name,
+            owner_id=user_id,
+            status="pending",
+            total=total,
+            message="Starting...",
+            progress=0
+        )
+        db.add(db_task)
+        db.commit()
+        return task_id
+    finally:
+        db.close()
 
 def update_task(task_id: str, status: str = None, progress: int = None, total: int = None, message: str = None, result: Any = None, error: str = None):
-    if task_id in _tasks:
-        task = _tasks[task_id]
-        if status is not None:
-            task["status"] = status
-        if progress is not None:
-            task["progress"] = progress
-        if total is not None:
-            task["total"] = total
-        if message is not None:
-            task["message"] = message
-        if result is not None:
-            task["result"] = result
-        if error is not None:
-            task["error"] = error
-        task["updated_at"] = datetime.utcnow().isoformat()
+    db = SessionLocal()
+    try:
+        db_task = db.query(schema.BackgroundTask).filter(schema.BackgroundTask.id == task_id).first()
+        if db_task:
+            if status is not None:
+                db_task.status = status
+            if progress is not None:
+                db_task.progress = progress
+            if total is not None:
+                db_task.total = total
+            if message is not None:
+                db_task.message = message
+            if result is not None:
+                db_task.result = json.dumps(result)
+            if error is not None:
+                db_task.error = error
+            db_task.updated_at = datetime.utcnow()
+            db.commit()
+    finally:
+        db.close()
 
 def get_task(task_id: str) -> Dict[str, Any]:
-    return _tasks.get(task_id)
+    db = SessionLocal()
+    try:
+        db_task = db.query(schema.BackgroundTask).filter(schema.BackgroundTask.id == task_id).first()
+        if not db_task:
+            return None
+        
+        return {
+            "id": db_task.id,
+            "name": db_task.name,
+            "status": db_task.status,
+            "progress": db_task.progress,
+            "total": db_task.total,
+            "message": db_task.message,
+            "result": json.loads(db_task.result) if db_task.result else None,
+            "error": db_task.error,
+            "updated_at": db_task.updated_at.isoformat() if db_task.updated_at else None
+        }
+    finally:
+        db.close()
 
-def get_all_tasks() -> Dict[str, Dict[str, Any]]:
-    return _tasks
+def get_active_tasks(user_id: int) -> List[Dict[str, Any]]:
+    """Returns all running or pending tasks for a user."""
+    db = SessionLocal()
+    try:
+        active_tasks = db.query(schema.BackgroundTask).filter(
+            schema.BackgroundTask.owner_id == user_id,
+            schema.BackgroundTask.status.in_(["pending", "running"])
+        ).order_by(schema.BackgroundTask.created_at.desc()).all()
+        
+        return [{
+            "id": t.id,
+            "name": t.name,
+            "status": t.status,
+            "progress": t.progress,
+            "total": t.total,
+            "message": t.message
+        } for t in active_tasks]
+    finally:
+        db.close()
