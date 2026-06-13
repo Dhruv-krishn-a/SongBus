@@ -78,8 +78,8 @@ const Library = () => {
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<'all' | 'youtube' | 'spotify'>('all');
   
-  const [importing, setImporting] = useState(false);
   const [status, setStatus] = useState({ spotify_connected: false, youtube_connected: false });
+  const [importing, setImporting] = useState(false);
   const [page, setPage] = useState(1);
   const [total, setTotal] = useState(0);
   const [totalPages, setTotalPages] = useState(0);
@@ -359,25 +359,6 @@ const Library = () => {
     }
   };
 
-  const handleSpotifySync = async () => {
-    if (!token) return;
-    setImporting(true);
-    setModal({ show: true, type: 'info', title: 'Spotify Sync Started', message: 'Accessing your Liked Songs...' });
-
-    try {
-      const res = await fetch('/api/music/sync-spotify', {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${token}` }
-      });
-      const data = await res.json();
-      if (res.ok && data.task_id) pollTask(data.task_id);
-      else throw new Error(data.detail || 'Failed');
-    } catch (err: any) {
-      setImporting(false);
-      setModal({ show: true, type: 'error', title: 'Error', message: err.message });
-    }
-  };
-
   const confirmDelete = (trackId: number, title: string) => {
     setModal({
       show: true,
@@ -536,7 +517,7 @@ const Library = () => {
                       {youtubePlaylists.map((p) => <option key={p.id} value={p.id}>{p.title} ({p.track_count})</option>)}
                     </select>
                   </div>
-                  <button onClick={handleYouTubeImport} className="bg-gray-900 text-white px-5 h-10 rounded-xl text-[11px] font-black uppercase tracking-wider hover:bg-gray-800">Scan</button>
+                  <button onClick={handleYouTubeImport} disabled={importing} className="bg-gray-900 text-white px-5 h-10 rounded-xl text-[11px] font-black uppercase tracking-wider hover:bg-gray-800 disabled:opacity-50">Scan</button>
                   <button onClick={fetchYouTubePlaylists} className="p-2.5 text-gray-400 hover:text-primary rounded-xl bg-gray-50"><RefreshCw className={`w-4 h-4 ${playlistsLoading ? 'animate-spin' : ''}`} /></button>
                 </div>
               )}
@@ -556,14 +537,11 @@ const Library = () => {
                           {spotifyPlaylists.map((p) => <option key={p.id} value={p.id}>{p.title} ({p.track_count})</option>)}
                         </select>
                       </div>
-                      <button onClick={handleSpotifyImport} className="bg-green-600 text-white px-5 h-10 rounded-xl text-[11px] font-black uppercase tracking-wider hover:bg-green-700">Scan</button>
+                      <button onClick={handleSpotifyImport} disabled={importing} className="bg-green-600 text-white px-5 h-10 rounded-xl text-[11px] font-black uppercase tracking-wider hover:bg-green-700 disabled:opacity-50">Scan</button>
                       <button onClick={fetchSpotifyPlaylists} className="p-2.5 text-gray-400 hover:text-green-600 rounded-xl bg-gray-50"><RefreshCw className={`w-4 h-4 ${playlistsLoading ? 'animate-spin' : ''}`} /></button>
                     </div>
                   )}
                 </div>
-                <button onClick={handleSpotifySync} disabled={importing} className="flex-1 sm:flex-none flex items-center justify-center gap-2 bg-gray-900 text-white px-6 py-3 rounded-2xl shadow-xl shadow-gray-900/20 hover:bg-gray-800 transition-all font-bold text-sm">
-                   Sync Liked Songs
-                </button>
              </div>
           )}
         </div>

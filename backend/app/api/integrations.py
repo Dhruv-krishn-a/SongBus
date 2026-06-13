@@ -302,19 +302,42 @@ def get_spotify_playlists(
     
     spotify_service = SpotifyService()
     client = spotify_service.get_valid_client(current_user, db)
-    playlists_data = spotify_service.get_user_playlists(client)
     
-    if not playlists_data:
-        return {"playlists": []}
-        
     playlists = []
-    for item in playlists_data.get("items", []):
+    
+    # 1. Add Liked Songs
+    try:
+        liked = client.current_user_saved_tracks(limit=1)
         playlists.append({
-            "id": item.get("id"),
-            "title": item.get("name"),
-            "track_count": item.get("tracks", {}).get("total", 0),
+            "id": "__liked_songs__",
+            "title": "Liked Songs",
+            "track_count": liked.get("total", 0),
             "source": "spotify"
         })
+    except Exception as e:
+        print(f"Liked songs count error: {e}")
+
+    # 2. Get real playlists (paging through all)
+    offset = 0
+    limit = 50
+    while True:
+        playlists_data = spotify_service.get_user_playlists(client, limit=limit, offset=offset)
+        if not playlists_data or not playlists_data.get("items"):
+            break
+            
+        for item in playlists_data.get("items", []):
+            if not item: continue
+            playlists.append({
+                "id": item.get("id"),
+                "title": item.get("name"),
+                "track_count": item.get("tracks", {}).get("total", 0),
+                "source": "spotify"
+            })
+            
+        if len(playlists_data.get("items", [])) < limit:
+            break
+        offset += limit
+            
     return {"playlists": playlists}
 
 def _import_spotify_playlist_task(task_id: str, user_id: int, playlist_id: str):
@@ -330,12 +353,21 @@ def _import_spotify_playlist_task(task_id: str, user_id: int, playlist_id: str):
         all_tracks = []
         limit = 100
         offset = 0
-        while True:
-            page = spotify_service.get_playlist_tracks(client, playlist_id, limit=limit, offset=offset)
-            if not page or not page.get("items"): break
-            all_tracks.extend(page["items"])
-            if len(page["items"]) < limit: break
-            offset += limit
+        
+        if playlist_id == "__liked_songs__":
+            while True:
+                page = client.current_user_saved_tracks(limit=limit, offset=offset)
+                if not page or not page.get("items"): break
+                all_tracks.extend(page["items"])
+                if len(page["items"]) < limit: break
+                offset += limit
+        else:
+            while True:
+                page = spotify_service.get_playlist_tracks(client, playlist_id, limit=limit, offset=offset)
+                if not page or not page.get("items"): break
+                all_tracks.extend(page["items"])
+                if len(page["items"]) < limit: break
+                offset += limit
 
         total = len(all_tracks)
         tasks.update_task(task_id, total=total, message=f"Importing {total} tracks...")
