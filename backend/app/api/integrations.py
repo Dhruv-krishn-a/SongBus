@@ -341,13 +341,20 @@ def get_spotify_playlists(
     return {"playlists": playlists}
 
 def _import_spotify_playlist_task(task_id: str, user_id: int, playlist_id: str):
+    from app.services.ytmusic import YTMusicService
     db = SessionLocal()
     try:
         user = db.query(schema.User).filter(schema.User.id == user_id).first()
         spotify_service = SpotifyService()
         client = spotify_service.get_valid_client(user, db)
         
-        tasks.update_task(task_id, status="running", message="Fetching playlist details...")
+        # Initialize YT once for the whole task
+        yt_auth_path = get_ytmusic_browser_auth_path()
+        if not os.path.exists(yt_auth_path):
+            yt_auth_path = None
+        yt_service = YTMusicService(yt_auth_path)
+        
+        tasks.update_task(task_id, status="running", message="Fetching tracks...")
         
         # Get tracks
         all_tracks = []
@@ -402,9 +409,9 @@ def _import_spotify_playlist_task(task_id: str, user_id: int, playlist_id: str):
                 current_batch.append(t)
                 imported += 1
             
-            # Deep Enrichment for this chunk
+            # Deep Enrichment for this chunk - Using pre-initialized services
             if current_batch:
-                enrich_tracks_chunk(db, current_batch, user_id, include_lyrics=True)
+                enrich_tracks_chunk(db, current_batch, user_id, include_lyrics=True, spotify_client=client, yt_service=yt_service)
                 
             tasks.update_task(task_id, progress=imported)
             db.commit()

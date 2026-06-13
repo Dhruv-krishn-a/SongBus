@@ -382,6 +382,9 @@ def list_youtube_playlists(current_user: schema.User = Depends(get_current_user)
 
 
 def _import_playlist_task(task_id: str, playlist_id: str, user_id: int):
+    from app.services.spotify import SpotifyService
+    from app.api.integrations import get_ytmusic_browser_auth_path
+
     db = SessionLocal()
     try:
         tasks.update_task(task_id, status="running", message="Loading existing tracks...")
@@ -389,6 +392,19 @@ def _import_playlist_task(task_id: str, playlist_id: str, user_id: int):
         if not current_user:
             tasks.update_task(task_id, status="failed", error="User not found")
             return
+
+        # Initialize Services ONCE
+        spotify_service = SpotifyService()
+        spotify_client = None
+        if current_user.spotify_access_token:
+            try:
+                spotify_client = spotify_service.get_valid_client(current_user, db)
+            except Exception: pass
+            
+        yt_auth_path = get_ytmusic_browser_auth_path()
+        if not os.path.exists(yt_auth_path):
+            yt_auth_path = None
+        yt_service = YTMusicService(yt_auth_path)
 
         # Pre-load existing data for this user to minimize DB hits
         existing_tracks = {
@@ -417,8 +433,7 @@ def _import_playlist_task(task_id: str, playlist_id: str, user_id: int):
                 source="youtube",
                 owner_id=current_user.id,
             )
-            t.genre = AnalysisEngine.classify_genre(t)
-            t.mood = AnalysisEngine.classify_mood(t)
+            # AI classification is now optional/later
             db.add(t)
             existing_tracks[ext_id] = t
             return t, True
@@ -479,12 +494,12 @@ def _import_playlist_task(task_id: str, playlist_id: str, user_id: int):
                     linked_count += 1
 
                 if len(current_batch) >= 20:
-                    enrich_tracks_chunk(db, current_batch, user_id, include_lyrics=True)
+                    enrich_tracks_chunk(db, current_batch, user_id, include_lyrics=True, spotify_client=spotify_client, yt_service=yt_service)
                     current_batch = []
                     db.flush()
             
             if current_batch:
-                enrich_tracks_chunk(db, current_batch, user_id, include_lyrics=True)
+                enrich_tracks_chunk(db, current_batch, user_id, include_lyrics=True, spotify_client=spotify_client, yt_service=yt_service)
             db.flush()
 
         else:
@@ -569,12 +584,12 @@ def _import_playlist_task(task_id: str, playlist_id: str, user_id: int):
                     linked_count += 1
                 
                 if len(current_batch) >= 20:
-                    enrich_tracks_chunk(db, current_batch, user_id, include_lyrics=True)
+                    enrich_tracks_chunk(db, current_batch, user_id, include_lyrics=True, spotify_client=spotify_client, yt_service=yt_service)
                     current_batch = []
                     db.flush()
             
             if current_batch:
-                enrich_tracks_chunk(db, current_batch, user_id, include_lyrics=True)
+                enrich_tracks_chunk(db, current_batch, user_id, include_lyrics=True, spotify_client=spotify_client, yt_service=yt_service)
             db.flush()
 
         db.commit()

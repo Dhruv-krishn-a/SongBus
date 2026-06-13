@@ -399,7 +399,7 @@ def get_playlists(current_user: schema.User = Depends(get_current_user), db: Ses
 GLOBAL_URI_CACHE = {}
 GLOBAL_LYRICS_CACHE = {}
 
-def enrich_tracks_chunk(db: Session, tracks: List[schema.Track], user_id: int, include_lyrics: bool = False):
+def enrich_tracks_chunk(db: Session, tracks: List[schema.Track], user_id: int, include_lyrics: bool = False, spotify_client=None, yt_service=None):
     """
     Core enrichment logic that matches tracks across platforms, 
     fetches DNA (BPM/Energy), and retrieves lyrics.
@@ -408,24 +408,48 @@ def enrich_tracks_chunk(db: Session, tracks: List[schema.Track], user_id: int, i
     from app.api.integrations import get_ytmusic_browser_auth_path
     from app.services.ytmusic import YTMusicService
     
-    # 1. Initialize Services
+    # 1. Initialize Services if not provided
     spotify_service = SpotifyService()
-    spotify_client = None
-    user = db.query(schema.User).filter(schema.User.id == user_id).first()
-    
-    if user and user.spotify_access_token:
-        try:
-            spotify_client = spotify_service.get_valid_client(user, db)
-        except Exception: pass
+    if not spotify_client:
+        user = db.query(schema.User).filter(schema.User.id == user_id).first()
+        if user and user.spotify_access_token:
+            try:
+                spotify_client = spotify_service.get_valid_client(user, db)
+            except Exception: pass
             
-    yt_auth_path = get_ytmusic_browser_auth_path()
-    if not os.path.exists(yt_auth_path):
-        yt_auth_path = None
-    yt_service = YTMusicService(yt_auth_path)
+    if not yt_service:
+        yt_auth_path = get_ytmusic_browser_auth_path()
+        if not os.path.exists(yt_auth_path):
+            yt_auth_path = None
+        yt_service = YTMusicService(yt_auth_path)
+
+    # 2. Aggressive Stateless Cache (DB Check)
+    # Check if ANY track in the entire DB already has this data to save API calls.
+    for t in tracks:
+        cache_match = db.query(schema.Track).filter(
+            schema.Track.title == t.title,
+            schema.Track.artist == t.artist
+        ).filter(
+            (schema.Track.bpm.is_not(None)) | (schema.Track.lyrics.is_not(None))
+        ).first()
+        
+        if cache_match:
+            if not t.bpm:
+                t.bpm, t.energy, t.danceability, t.valence = cache_match.bpm, cache_match.energy, cache_match.danceability, cache_match.valence
+            if not t.lyrics:
+                t.lyrics = cache_match.lyrics
+            if not t.spotify_uri:
+                t.spotify_uri = cache_match.spotify_uri
+            if not t.matched_youtube_id:
+                t.matched_youtube_id = cache_match.matched_youtube_id
 
     def process_track_thread(t_data):
         res = {"spotify_uri": None, "matched_youtube_id": None, "lyrics": None}
         try:
+            # Skip if already filled by cache
+            if t_data.get("spotify_uri") and t_data.get("lyrics") and t_data.get("matched_youtube_id"):
+                return res
+
             # 1. Spotify Match
             if spotify_client and not t_data.get("spotify_uri"):
                 uri = spotify_service.search_and_match_track(spotify_client, type('obj', (object,), t_data))
@@ -443,7 +467,7 @@ def enrich_tracks_chunk(db: Session, tracks: List[schema.Track], user_id: int, i
         except Exception: pass
         return res
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=15) as executor:
         track_data = [
             {
                 "title": t.title, "artist": t.artist, "album": t.album, 
@@ -482,13 +506,29 @@ def enrich_tracks_chunk(db: Session, tracks: List[schema.Track], user_id: int, i
     db.commit()
 
 def _enrich_library_task(task_id: str, user_id: int, include_lyrics: bool = False):
-    from datetime import datetime
+    from datetime import datetime, timedelta
+    from app.api.integrations import get_ytmusic_browser_auth_path
+    from app.services.ytmusic import YTMusicService
+
     db = SessionLocal()
     try:
         user = db.query(schema.User).filter(schema.User.id == user_id).first()
         if not user:
             tasks.update_task(task_id, status="failed", error="User not found")
             return
+
+        # Initialize Services ONCE
+        spotify_service = SpotifyService()
+        spotify_client = None
+        if user.spotify_access_token:
+            try:
+                spotify_client = spotify_service.get_valid_client(user, db)
+            except Exception: pass
+            
+        yt_auth_path = get_ytmusic_browser_auth_path()
+        if not os.path.exists(yt_auth_path):
+            yt_auth_path = None
+        yt_service = YTMusicService(yt_auth_path)
 
         budget_limit = 200
         seven_days_ago = datetime.utcnow() - timedelta(days=7)
@@ -510,12 +550,12 @@ def _enrich_library_task(task_id: str, user_id: int, include_lyrics: bool = Fals
         total_tracks = len(tracks)
         tasks.update_task(task_id, total=total_tracks, message="Building Bridge...")
 
-        # Process in batches of 10 for progress updates
+        # Process in batches of 20 for faster overall flow
         processed = 0
-        chunk_size = 10
+        chunk_size = 20
         for i in range(0, total_tracks, chunk_size):
             chunk = tracks[i : i + chunk_size]
-            enrich_tracks_chunk(db, chunk, user_id, include_lyrics=include_lyrics)
+            enrich_tracks_chunk(db, chunk, user_id, include_lyrics=include_lyrics, spotify_client=spotify_client, yt_service=yt_service)
             processed += len(chunk)
             tasks.update_task(task_id, progress=processed)
 
