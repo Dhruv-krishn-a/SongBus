@@ -378,9 +378,15 @@ def _import_spotify_playlist_task(task_id: str, user_id: int, playlist_id: str):
 
         total = len(all_tracks)
         tasks.update_task(task_id, total=total, message=f"Importing {total} tracks...")
+
+        # 1. Pre-load existing track IDs to avoid DB hits inside loop
+        existing_tracks = {
+            t.external_id: t for t in db.query(schema.Track).filter(schema.Track.owner_id == user_id).all()
+            if t.external_id
+        }
         
         imported = 0
-        chunk_size = 20
+        chunk_size = 50 # Larger chunk for fewer commits
         for i in range(0, total, chunk_size):
             chunk = all_tracks[i:i+chunk_size]
             current_batch = []
@@ -392,7 +398,7 @@ def _import_spotify_playlist_task(task_id: str, user_id: int, playlist_id: str):
                 artists = ", ".join([a.get("name") for a in track_data.get("artists", [])])
                 ext_id = track_data.get("id")
                 
-                t = db.query(schema.Track).filter(schema.Track.owner_id == user.id, schema.Track.external_id == ext_id).first()
+                t = existing_tracks.get(ext_id)
                 if not t:
                     thumb = None
                     if track_data.get("album", {}).get("images"):
@@ -406,6 +412,8 @@ def _import_spotify_playlist_task(task_id: str, user_id: int, playlist_id: str):
                         album=track_data.get("album", {}).get("name")
                     )
                     db.add(t)
+                    db.flush() # Flush to get ID
+                    existing_tracks[ext_id] = t
                 current_batch.append(t)
                 imported += 1
             

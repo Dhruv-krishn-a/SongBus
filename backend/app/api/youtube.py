@@ -384,6 +384,7 @@ def list_youtube_playlists(current_user: schema.User = Depends(get_current_user)
 def _import_playlist_task(task_id: str, playlist_id: str, user_id: int):
     from app.services.spotify import SpotifyService
     from app.api.integrations import get_ytmusic_browser_auth_path
+    from app.services.ytmusic import YTMusicService
 
     db = SessionLocal()
     try:
@@ -493,14 +494,16 @@ def _import_playlist_task(task_id: str, playlist_id: str, user_id: int):
                         existing_links.add(track.id)
                     linked_count += 1
 
-                if len(current_batch) >= 20:
+                if len(current_batch) >= 50:
+                    db.flush()
                     enrich_tracks_chunk(db, current_batch, user_id, include_lyrics=True, spotify_client=spotify_client, yt_service=yt_service)
                     current_batch = []
-                    db.flush()
+                    db.commit()
             
             if current_batch:
+                db.flush()
                 enrich_tracks_chunk(db, current_batch, user_id, include_lyrics=True, spotify_client=spotify_client, yt_service=yt_service)
-            db.flush()
+                db.commit()
 
         else:
             tasks.update_task(task_id, message="Fetching Playlist...")
@@ -583,14 +586,16 @@ def _import_playlist_task(task_id: str, playlist_id: str, user_id: int):
                         existing_links.add(track.id)
                     linked_count += 1
                 
-                if len(current_batch) >= 20:
+                if len(current_batch) >= 50:
+                    db.flush()
                     enrich_tracks_chunk(db, current_batch, user_id, include_lyrics=True, spotify_client=spotify_client, yt_service=yt_service)
                     current_batch = []
-                    db.flush()
+                    db.commit()
             
             if current_batch:
+                db.flush()
                 enrich_tracks_chunk(db, current_batch, user_id, include_lyrics=True, spotify_client=spotify_client, yt_service=yt_service)
-            db.flush()
+                db.commit()
 
         db.commit()
         result = {

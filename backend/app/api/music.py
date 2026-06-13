@@ -423,25 +423,27 @@ def enrich_tracks_chunk(db: Session, tracks: List[schema.Track], user_id: int, i
             yt_auth_path = None
         yt_service = YTMusicService(yt_auth_path)
 
-    # 2. Aggressive Stateless Cache (DB Check)
-    # Check if ANY track in the entire DB already has this data to save API calls.
-    for t in tracks:
-        cache_match = db.query(schema.Track).filter(
-            schema.Track.title == t.title,
-            schema.Track.artist == t.artist
-        ).filter(
+    # 2. Bulk Stateless Cache (One Query for the whole chunk)
+    from sqlalchemy import tuple_
+    track_keys = [(t.title, t.artist) for t in tracks]
+    if track_keys:
+        # Find ANY tracks in the DB that already have DNA or Lyrics for these titles/artists
+        cache_matches = db.query(schema.Track).filter(
+            tuple_(schema.Track.title, schema.Track.artist).in_(track_keys),
             (schema.Track.bpm.is_not(None)) | (schema.Track.lyrics.is_not(None))
-        ).first()
+        ).all()
         
-        if cache_match:
-            if not t.bpm:
-                t.bpm, t.energy, t.danceability, t.valence = cache_match.bpm, cache_match.energy, cache_match.danceability, cache_match.valence
-            if not t.lyrics:
-                t.lyrics = cache_match.lyrics
-            if not t.spotify_uri:
-                t.spotify_uri = cache_match.spotify_uri
-            if not t.matched_youtube_id:
-                t.matched_youtube_id = cache_match.matched_youtube_id
+        # Build a memory map for instant lookup
+        cache_map = {(m.title, m.artist): m for m in cache_matches}
+        
+        for t in tracks:
+            m = cache_map.get((t.title, t.artist))
+            if m:
+                if not t.bpm:
+                    t.bpm, t.energy, t.danceability, t.valence = m.bpm, m.energy, m.danceability, m.valence
+                if not t.lyrics: t.lyrics = m.lyrics
+                if not t.spotify_uri: t.spotify_uri = m.spotify_uri
+                if not t.matched_youtube_id: t.matched_youtube_id = m.matched_youtube_id
 
     def process_track_thread(t_data):
         res = {"spotify_uri": None, "matched_youtube_id": None, "lyrics": None}
@@ -506,7 +508,7 @@ def enrich_tracks_chunk(db: Session, tracks: List[schema.Track], user_id: int, i
     db.commit()
 
 def _enrich_library_task(task_id: str, user_id: int, include_lyrics: bool = False):
-    from datetime import datetime, timedelta
+    from datetime import datetime
     from app.api.integrations import get_ytmusic_browser_auth_path
     from app.services.ytmusic import YTMusicService
 
@@ -616,15 +618,23 @@ def _sync_history_task(task_id: str, user_id: int):
         added_history_count = 0
         processed_count = 0
 
-        def get_or_create_track(title, artist, ext_id=None, source=None):
-            t = None
-            if ext_id:
-                t = db.query(schema.Track).filter(schema.Track.owner_id == user.id, schema.Track.external_id == ext_id).first()
+        # Pre-load existing tracks for memory matching
+        existing_tracks = {
+            t.external_id: t for t in db.query(schema.Track).filter(schema.Track.owner_id == user_id).all()
+            if t.external_id
+        }
+
+        def get_or_create_track_memory(title, artist, ext_id=None, source=None):
+            t = existing_tracks.get(ext_id)
             if not t:
-                t = db.query(schema.Track).filter(schema.Track.owner_id == user.id, schema.Track.title == title, schema.Track.artist == artist).first()
+                # Fallback to title/artist check (less precise but good for history)
+                t = next((et for et in existing_tracks.values() if et.title == title and et.artist == artist), None)
+            
             if not t:
                 t = schema.Track(title=title, artist=artist, external_id=ext_id, source=source or "history", owner_id=user.id)
-                db.add(t); db.flush()
+                db.add(t)
+                db.flush() # Get ID
+                existing_tracks[ext_id] = t
             return t
 
         if user.spotify_access_token:
@@ -644,8 +654,11 @@ def _sync_history_task(task_id: str, user_id: int):
                         uri = track_data.get("uri")
                         title = track_data.get("name")
                         artists = ", ".join([a.get("name") for a in track_data.get("artists", [])])
-                        t = get_or_create_track(title, artists, ext_id, "spotify")
+                        
+                        t = get_or_create_track_memory(title, artists, ext_id, "spotify")
+                        
                         if uri and not t.spotify_uri: t.spotify_uri = uri
+                        
                         existing_hist = db.query(schema.PlayHistory).filter(schema.PlayHistory.owner_id == user.id, schema.PlayHistory.track_id == t.id, schema.PlayHistory.played_at == played_at).first()
                         if not existing_hist:
                             db.add(schema.PlayHistory(owner_id=user.id, track_id=t.id, played_at=played_at, platform="spotify"))
