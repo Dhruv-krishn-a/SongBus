@@ -398,6 +398,8 @@ def get_playlists(current_user: schema.User = Depends(get_current_user), db: Ses
 # --- High Performance Multi-Threaded Enrichment ---
 GLOBAL_URI_CACHE = {}
 GLOBAL_LYRICS_CACHE = {}
+SPOTIFY_COOLDOWN_UNTIL = 0
+YT_COOLDOWN_UNTIL = 0
 
 def enrich_tracks_chunk(db: Session, tracks: List[schema.Track], user_id: int, include_lyrics: bool = False, spotify_client=None, yt_service=None):
     """
@@ -405,8 +407,10 @@ def enrich_tracks_chunk(db: Session, tracks: List[schema.Track], user_id: int, i
     fetches DNA (BPM/Energy), and retrieves lyrics.
     """
     import concurrent.futures
+    import time
     from app.api.integrations import get_ytmusic_browser_auth_path
     from app.services.ytmusic import YTMusicService
+    global SPOTIFY_COOLDOWN_UNTIL, YT_COOLDOWN_UNTIL
     
     # 1. Initialize Services if not provided
     spotify_service = SpotifyService()
@@ -423,19 +427,16 @@ def enrich_tracks_chunk(db: Session, tracks: List[schema.Track], user_id: int, i
             yt_auth_path = None
         yt_service = YTMusicService(yt_auth_path)
 
-    # 2. Bulk Stateless Cache (One Query for the whole chunk)
+    # 2. Bulk Stateless Cache
     from sqlalchemy import tuple_
     track_keys = [(t.title, t.artist) for t in tracks]
     if track_keys:
-        # Find ANY tracks in the DB that already have DNA or Lyrics for these titles/artists
         cache_matches = db.query(schema.Track).filter(
             tuple_(schema.Track.title, schema.Track.artist).in_(track_keys),
             (schema.Track.bpm.is_not(None)) | (schema.Track.lyrics.is_not(None))
         ).all()
         
-        # Build a memory map for instant lookup
         cache_map = {(m.title, m.artist): m for m in cache_matches}
-        
         for t in tracks:
             m = cache_map.get((t.title, t.artist))
             if m:
@@ -447,21 +448,32 @@ def enrich_tracks_chunk(db: Session, tracks: List[schema.Track], user_id: int, i
 
     def process_track_thread(t_data):
         res = {"spotify_uri": None, "matched_youtube_id": None, "lyrics": None}
+        global SPOTIFY_COOLDOWN_UNTIL, YT_COOLDOWN_UNTIL
         try:
-            # Skip if already filled by cache
             if t_data.get("spotify_uri") and t_data.get("lyrics") and t_data.get("matched_youtube_id"):
                 return res
 
-            # 1. Spotify Match
+            # 1. Spotify Match (Skip if in Cooldown)
             if spotify_client and not t_data.get("spotify_uri"):
-                uri = spotify_service.search_and_match_track(spotify_client, type('obj', (object,), t_data))
-                if uri: res["spotify_uri"] = uri
+                if time.time() > SPOTIFY_COOLDOWN_UNTIL:
+                    try:
+                        uri = spotify_service.search_and_match_track(spotify_client, type('obj', (object,), t_data))
+                        if uri: res["spotify_uri"] = uri
+                    except Exception as e:
+                        if "429" in str(e):
+                            SPOTIFY_COOLDOWN_UNTIL = time.time() + 60 # 1 min backoff
+                        print(f"Spotify Search Rate Limit: {e}")
             
-            # 2. YouTube Match
+            # 2. YouTube Match (Skip if in Cooldown)
             if not t_data.get("matched_youtube_id") and t_data.get("source") == "spotify":
-                yt_id = yt_service.search_and_match_track(t_data['title'], t_data['artist'], t_data.get('duration_ms'))
-                if yt_id: res["matched_youtube_id"] = yt_id
-
+                if time.time() > YT_COOLDOWN_UNTIL:
+                    try:
+                        yt_id = yt_service.search_and_match_track(t_data['title'], t_data['artist'], t_data.get('duration_ms'))
+                        if yt_id: res["matched_youtube_id"] = yt_id
+                    except Exception as e:
+                        if "429" in str(e):
+                            YT_COOLDOWN_UNTIL = time.time() + 60
+            
             # 3. Lyrics
             if include_lyrics and not t_data.get("lyrics"):
                 lyrics = LyricsService.fetch_lyrics(t_data['title'], t_data['artist'], t_data.get('album'), t_data.get('duration_ms'))
@@ -469,7 +481,7 @@ def enrich_tracks_chunk(db: Session, tracks: List[schema.Track], user_id: int, i
         except Exception: pass
         return res
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=15) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
         track_data = [
             {
                 "title": t.title, "artist": t.artist, "album": t.album, 
@@ -481,15 +493,17 @@ def enrich_tracks_chunk(db: Session, tracks: List[schema.Track], user_id: int, i
         
         futures = {executor.submit(process_track_thread, d): idx for idx, d in enumerate(track_data)}
         for future in concurrent.futures.as_completed(futures):
-            idx = futures[future]
-            result = future.result()
-            t = tracks[idx]
-            if result.get("spotify_uri"): t.spotify_uri = result["spotify_uri"]
-            if result.get("matched_youtube_id"): t.matched_youtube_id = result["matched_youtube_id"]
-            if result.get("lyrics"): t.lyrics = result["lyrics"]
-            t.last_enriched_at = datetime.utcnow()
+            try:
+                idx = futures[future]
+                result = future.result()
+                t = tracks[idx]
+                if result.get("spotify_uri"): t.spotify_uri = result["spotify_uri"]
+                if result.get("matched_youtube_id"): t.matched_youtube_id = result["matched_youtube_id"]
+                if result.get("lyrics"): t.lyrics = result["lyrics"]
+                t.last_enriched_at = datetime.utcnow()
+            except Exception: pass
         
-        # 2. Bulk DNA
+        # 3. Bulk DNA (Safe from Search Rate limits)
         if spotify_client:
             matched_uris = [t.spotify_uri for t in tracks if t.spotify_uri and t.bpm is None]
             if matched_uris:

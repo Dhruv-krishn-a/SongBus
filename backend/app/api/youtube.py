@@ -196,9 +196,11 @@ def collect_liked_videos(
     db: Session,
     *,
     music_only: bool,
+    task_id: str = None,
 ) -> list[dict]:
     items = []
     next_page_token = None
+    fetched_count = 0
 
     while True:
         response = request_with_refresh(
@@ -213,7 +215,10 @@ def collect_liked_videos(
             )
 
         payload = response.json()
+        total_available = payload.get("pageInfo", {}).get("totalResults", 0)
+        
         for item in payload.get("items", []):
+            fetched_count += 1
             snippet = item.get("snippet", {})
             
             if music_only:
@@ -239,6 +244,9 @@ def collect_liked_videos(
                     continue
 
             items.append(item)
+
+        if task_id:
+            tasks.update_task(task_id, progress=0, total=total_available, message=f"Fetched {fetched_count} items from YouTube...")
 
         next_page_token = payload.get("nextPageToken")
         if not next_page_token:
@@ -451,12 +459,12 @@ def _import_playlist_task(task_id: str, playlist_id: str, user_id: int):
         if playlist_id == "__liked_videos__":
             tasks.update_task(task_id, message="Fetching Liked Music...")
             playlist_title = "Liked Music"
-            items = collect_liked_videos(current_user, db, music_only=True)
+            items = collect_liked_videos(current_user, db, music_only=True, task_id=task_id)
             local_playlist = upsert_playlist_for_user(current_user, db, playlist_id=playlist_id, playlist_name=playlist_title)
             existing_links = {pt.track_id for pt in db.query(schema.PlaylistTrack).filter(schema.PlaylistTrack.playlist_id == local_playlist.id).all()}
             processed_video_ids = set()
 
-            tasks.update_task(task_id, total=len(items))
+            tasks.update_task(task_id, total=len(items), message=f"Starting import of {len(items)} tracks...")
             current_batch = []
 
             for item in items:
