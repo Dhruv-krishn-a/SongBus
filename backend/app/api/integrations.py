@@ -25,7 +25,14 @@ class BrowserAuthPayload(BaseModel):
 
 
 def get_youtube_redirect_uri() -> str:
-    return os.getenv("YOUTUBE_REDIRECT_URI", "https://localhost:5173/callback/youtube")
+    # 1. Try environment variable (Vercel / Production)
+    env_uri = os.getenv("YOUTUBE_REDIRECT_URI")
+    if env_uri:
+        return env_uri.strip()
+        
+    # 2. Fallback to Localhost (Development)
+    # Defaulting to http since Vite usually runs without SSL locally.
+    return "http://localhost:5173/callback/youtube"
 
 
 def get_ytmusic_browser_auth_path() -> str:
