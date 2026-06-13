@@ -625,38 +625,99 @@ def _sync_spotify_library_task(task_id: str, user_id: int):
         user = db.query(schema.User).filter(schema.User.id == user_id).first()
         spotify_service = SpotifyService()
         client = spotify_service.get_valid_client(user, db)
-        tasks.update_task(task_id, status="running", message="Scanning Liked Songs...")
-        first_page = spotify_service.get_library_tracks(client, limit=1)
-        if not first_page: tasks.update_task(task_id, status="completed", message="Library empty."); return
+        
+        tasks.update_task(task_id, status="running", message="Connecting to Spotify...")
+        
+        # Test the connection and get total count
+        try:
+            first_page = client.current_user_saved_tracks(limit=1)
+        except Exception as e:
+            tasks.update_task(task_id, status="failed", error=f"Spotify API Error: {str(e)}")
+            return
+
+        if not first_page or first_page.get("total") == 0:
+            tasks.update_task(task_id, status="completed", message="Your Spotify 'Liked Songs' library is empty.")
+            return
+
         total_tracks = first_page.get("total", 0)
-        tasks.update_task(task_id, total=total_tracks, message=f"Syncing {total_tracks} tracks...")
-        processed_count = 0; added_count = 0; limit = 50
+        tasks.update_task(task_id, total=total_tracks, message=f"Syncing {total_tracks} liked songs...")
+
+        processed_count = 0
+        added_count = 0
+        limit = 50
+        
         for offset in range(0, total_tracks, limit):
-            page = spotify_service.get_library_tracks(client, limit=limit, offset=offset)
-            if not page: break
+            try:
+                page = client.current_user_saved_tracks(limit=limit, offset=offset)
+            except Exception as e:
+                print(f"Error fetching page at offset {offset}: {e}")
+                break
+
+            if not page or not page.get("items"):
+                break
+
             current_batch = []
             for item in page.get("items", []):
                 track_data = item.get("track", {})
                 if not track_data: continue
+                
                 title = track_data.get("name")
                 artists = ", ".join([a.get("name") for a in track_data.get("artists", [])])
                 ext_id = track_data.get("id")
+                uri = track_data.get("uri")
+                
+                # Check for existing track by Spotify ID
                 t = db.query(schema.Track).filter(schema.Track.owner_id == user.id, schema.Track.external_id == ext_id).first()
+                
                 if not t:
-                    t = schema.Track(title=title, artist=artists, album=track_data.get("album", {}).get("name"), duration_ms=track_data.get("duration_ms"), thumbnail_url=track_data.get("album", {}).get("images", [{}])[0].get("url"), spotify_uri=track_data.get("uri"), external_id=ext_id, source="spotify", owner_id=user.id, release_year=track_data.get("album", {}).get("release_date", "")[:4])
-                    db.add(t); added_count += 1
+                    # Check for existing track by Title/Artist (imported from YouTube but matched)
+                    t = db.query(schema.Track).filter(
+                        schema.Track.owner_id == user.id, 
+                        schema.Track.title == title, 
+                        schema.Track.artist == artists
+                    ).first()
+
+                if not t:
+                    # Create new track
+                    album_data = track_data.get("album", {})
+                    t = schema.Track(
+                        title=title, 
+                        artist=artists, 
+                        album=album_data.get("name"), 
+                        duration_ms=track_data.get("duration_ms"), 
+                        thumbnail_url=album_data.get("images", [{}])[0].get("url") if album_data.get("images") else None, 
+                        spotify_uri=uri, 
+                        external_id=ext_id, 
+                        source="spotify", 
+                        owner_id=user.id, 
+                        release_year=album_data.get("release_date", "")[:4]
+                    )
+                    db.add(t)
+                    added_count += 1
+                else:
+                    # Update existing track with Spotify metadata if missing
+                    if not t.spotify_uri: t.spotify_uri = uri
+                    if not t.external_id: t.external_id = ext_id
+                
                 current_batch.append(t)
                 processed_count += 1
             
-            # Deep Enrichment during import
+            # Flush to get IDs for new tracks before enrichment
+            db.flush()
+            
+            # Deep Enrichment during import (BPM, Energy, Lyrics, YouTube ID)
             if current_batch:
                 enrich_tracks_chunk(db, current_batch, user_id, include_lyrics=True)
                 
-            if processed_count % 10 == 0: tasks.update_task(task_id, progress=processed_count)
+            tasks.update_task(task_id, progress=processed_count, message=f"Processed {processed_count}/{total_tracks} tracks...")
             db.commit()
-        tasks.update_task(task_id, status="completed", message=f"Synced {added_count} new tracks.")
-    except Exception as e: db.rollback(); tasks.update_task(task_id, status="failed", error=str(e))
-    finally: db.close()
+
+        tasks.update_task(task_id, status="completed", message=f"Successfully synced {added_count} new tracks and updated {processed_count - added_count} existing ones.")
+    except Exception as e: 
+        db.rollback()
+        tasks.update_task(task_id, status="failed", error=str(e))
+    finally: 
+        db.close()
 
 @router.post("/sync-spotify")
 def sync_spotify_library(background_tasks: BackgroundTasks, current_user: schema.User = Depends(get_current_user)):
