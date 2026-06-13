@@ -255,30 +255,6 @@ const Library = () => {
       });
   }, [token, page, debouncedSearch, artistFilter, genreFilter, moodFilter, sortBy, sortOrder, activeTab]);
 
-  useEffect(() => {
-    fetchStatus();
-    if (token) {
-      fetch('/api/tasks/active', {
-        headers: { Authorization: `Bearer ${token}` }
-      })
-      .then(res => res.json())
-      .then(data => {
-        if (data.tasks && data.tasks.length > 0) {
-           const t = data.tasks[0];
-           // Only re-attach if it's an import/sync task relevant to this page
-           if (t.name.includes('Import') || t.name.includes('Sync')) {
-              pollTask(t.id);
-           }
-        }
-      })
-      .catch(console.error);
-    }
-  }, [fetchStatus, token]);
-
-  useEffect(() => {
-    fetchTracks(1);
-  }, [token, debouncedSearch, artistFilter, genreFilter, moodFilter, sortBy, sortOrder, activeTab]);
-
   const handlePageChange = (newPage: number) => {
     setPage(newPage);
     fetchTracks(newPage);
@@ -334,6 +310,26 @@ const Library = () => {
     };
     poll();
   }, [token, handlePageChange]);
+
+  useEffect(() => {
+    fetchStatus();
+    if (token) {
+      fetch('/api/tasks/active', {
+        headers: { Authorization: `Bearer ${token}` }
+      })
+      .then(res => res.json())
+      .then(data => {
+        if (data.tasks && data.tasks.length > 0) {
+           const t = data.tasks[0];
+           // Only re-attach if it's an import/sync task relevant to this page
+           if (t.name.includes('Import') || t.name.includes('Sync')) {
+              pollTask(t.id);
+           }
+        }
+      })
+      .catch(console.error);
+    }
+  }, [fetchStatus, token, pollTask]);
 
   const handleYouTubeImport = async () => {
     if (!token || !selectedPlaylistId) return;
