@@ -18,12 +18,13 @@ class SpotifyService:
         if not self.client_id or not self.client_secret:
             self.auth_manager = None
         else:
-            self.scope = "playlist-modify-public playlist-modify-private user-library-read playlist-read-private playlist-read-collaborative"
+            self.scope = "playlist-modify-public playlist-modify-private user-library-read playlist-read-private playlist-read-collaborative user-read-private"
             self.auth_manager = SpotifyOAuth(
                 client_id=self.client_id,
                 client_secret=self.client_secret,
                 redirect_uri=self.redirect_uri,
                 scope=self.scope,
+                show_dialog=True,
                 open_browser=False
             )
 
