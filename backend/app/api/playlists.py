@@ -683,3 +683,85 @@ def export_all_playlists(
         "success_count": success_count,
         "failed_count": failed_count
     }
+
+@router.get("/debug-spotify-token")
+def debug_spotify_token(current_user: schema.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """
+    Diagnostic endpoint: makes a raw HTTP request to Spotify to create a test playlist,
+    bypassing spotipy, so we can see the EXACT error body Spotify returns.
+    """
+    import requests
+    import logging
+    logger = logging.getLogger("songbus.debug")
+    
+    if not current_user.spotify_access_token:
+        return {"error": "No Spotify token stored"}
+    
+    spotify_service = SpotifyService()
+    # Ensure token is fresh
+    client = spotify_service.get_valid_client(current_user, db)
+    token = current_user.spotify_access_token
+    
+    # Step 1: Check /me
+    me_resp = requests.get(
+        "https://api.spotify.com/v1/me",
+        headers={"Authorization": f"Bearer {token}"}
+    )
+    me_data = me_resp.json() if me_resp.status_code == 200 else me_resp.text
+    
+    user_id = me_data.get("id") if isinstance(me_data, dict) else None
+    
+    # Step 2: Try raw playlist creation
+    playlist_resp = requests.post(
+        f"https://api.spotify.com/v1/users/{user_id}/playlists",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json"
+        },
+        json={
+            "name": "SongBus Debug Test",
+            "description": "Test playlist - safe to delete",
+            "public": False
+        }
+    )
+    
+    playlist_body = playlist_resp.json() if playlist_resp.headers.get("content-type", "").startswith("application/json") else playlist_resp.text
+    
+    # Step 3: Also try the /me/playlists endpoint (alternative)
+    alt_resp = requests.post(
+        "https://api.spotify.com/v1/me/playlists",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json"
+        },
+        json={
+            "name": "SongBus Debug Test 2",
+            "description": "Test playlist - safe to delete",
+            "public": False
+        }
+    )
+    
+    alt_body = alt_resp.json() if alt_resp.headers.get("content-type", "").startswith("application/json") else alt_resp.text
+    
+    result = {
+        "token_prefix": token[:25] + "...",
+        "me_status": me_resp.status_code,
+        "me_data": {
+            "id": me_data.get("id") if isinstance(me_data, dict) else None,
+            "display_name": me_data.get("display_name") if isinstance(me_data, dict) else None,
+            "product": me_data.get("product") if isinstance(me_data, dict) else None,
+        },
+        "create_playlist_v1_users": {
+            "url": f"https://api.spotify.com/v1/users/{user_id}/playlists",
+            "status": playlist_resp.status_code,
+            "body": playlist_body,
+        },
+        "create_playlist_v1_me": {
+            "url": "https://api.spotify.com/v1/me/playlists",
+            "status": alt_resp.status_code,
+            "body": alt_body,
+        }
+    }
+    
+    logger.info(f"[debug-spotify-token] Full diagnostic result: {result}")
+    return result
