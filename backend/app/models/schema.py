@@ -28,9 +28,10 @@ class Playlist(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, index=True)
+    description = Column(String, nullable=True)
     source = Column(String) # e.g., "youtube", "spotify", "smart_generated"
     external_id = Column(String, nullable=True) # ID from YT/Spotify
-    owner_id = Column(Integer, ForeignKey("users.id"))
+    owner_id = Column(Integer, ForeignKey("users.id"), index=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     owner = relationship("User", back_populates="playlists")
@@ -47,6 +48,9 @@ class Track(Base):
     duration_ms = Column(Integer, nullable=True)
     genre = Column(String, nullable=True)
     mood = Column(String, nullable=True)
+    themes = Column(String, nullable=True)
+    emotions = Column(String, nullable=True)
+    contexts = Column(String, nullable=True)
     language = Column(String, nullable=True)
     thumbnail_url = Column(String, nullable=True)
     spotify_uri = Column(String, nullable=True)
@@ -65,7 +69,10 @@ class Track(Base):
     lyrics = Column(String, nullable=True)
     last_enriched_at = Column(DateTime, nullable=True)
     
-    owner_id = Column(Integer, ForeignKey("users.id"))
+    lyrics_not_found = Column(Boolean, default=False)
+    ai_not_found = Column(Boolean, default=False)
+    
+    owner_id = Column(Integer, ForeignKey("users.id"), index=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     owner = relationship("User", back_populates="tracks")
@@ -106,7 +113,7 @@ class BackgroundTask(Base):
     message = Column(String, nullable=True)
     result = Column(String, nullable=True) # JSON string
     error = Column(String, nullable=True)
-    owner_id = Column(Integer, ForeignKey("users.id"))
+    owner_id = Column(Integer, ForeignKey("users.id"), index=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

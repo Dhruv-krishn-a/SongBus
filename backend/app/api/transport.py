@@ -94,13 +94,12 @@ def _export_job(task_id: str, user_id: int, track_ids: List[int], destination: s
                 tasks.update_task(task_id, progress=exported, message=f"Exported {exported}/{total}...")
                 
         elif destination == "youtube":
-            from app.api.integrations import get_ytmusic_browser_auth_path
-            yt_auth_path = None
-            path = get_ytmusic_browser_auth_path()
-            if os.path.exists(path):
-                yt_auth_path = path
-                
-            yt_service = YTMusicService(yt_auth_path)
+            if not user.yt_access_token:
+                tasks.update_task(task_id, status="failed", error="YouTube Music not connected")
+                return
+
+            yt_service = YTMusicService.get_valid_client(user, db)
+            
             # Actually, YTMusic API requires creating a playlist and adding videoIds.
             # We don't have the create playlist implemented fully yet, we can stub or implement it here.
             try:
@@ -117,7 +116,7 @@ def _export_job(task_id: str, user_id: int, track_ids: List[int], destination: s
                     tasks.update_task(task_id, progress=exported, message=f"Exported {exported}/{total}...")
             except Exception as e:
                 print(f"YT Export Error: {e}")
-                tasks.update_task(task_id, status="failed", error="Failed to export to YouTube. Make sure your browser headers are valid.")
+                tasks.update_task(task_id, status="failed", error="Failed to export to YouTube. Ensure your connection is valid.")
                 return
 
         tasks.update_task(task_id, status="completed", message=f"Successfully exported {exported} tracks to {destination}.", progress=total, result={"exported": exported})

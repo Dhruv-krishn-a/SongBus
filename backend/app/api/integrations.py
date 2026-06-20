@@ -10,7 +10,7 @@ from app.models import schema
 from app.api.deps import get_current_user
 from app.core import tasks
 from app.services.spotify import SpotifyService
-from app.api.music import enrich_tracks_chunk
+
 from datetime import datetime, timedelta
 from urllib.parse import quote
 
@@ -287,10 +287,18 @@ def disconnect_youtube(current_user: schema.User = Depends(get_current_user), db
 
 @router.get("/status")
 def get_integration_status(current_user: schema.User = Depends(get_current_user)):
-    return {
-        "spotify_connected": bool(current_user.spotify_access_token),
-        "youtube_connected": bool(current_user.yt_access_token)
-    }
+    try:
+        status = {
+            "spotify_connected": bool(current_user.spotify_access_token),
+            "youtube_connected": bool(current_user.yt_access_token)
+        }
+        return status
+    except Exception as e:
+        print(f"DB Error while fetching integration status: {e}")
+        return {
+            "spotify_connected": False,
+            "youtube_connected": False
+        }
 
 @router.get("/spotify/playlists")
 def get_spotify_playlists(
@@ -341,18 +349,11 @@ def get_spotify_playlists(
     return {"playlists": playlists}
 
 def _import_spotify_playlist_task(task_id: str, user_id: int, playlist_id: str):
-    from app.services.ytmusic import YTMusicService
     db = SessionLocal()
     try:
         user = db.query(schema.User).filter(schema.User.id == user_id).first()
         spotify_service = SpotifyService()
         client = spotify_service.get_valid_client(user, db)
-        
-        # Initialize YT once for the whole task
-        yt_auth_path = get_ytmusic_browser_auth_path()
-        if not os.path.exists(yt_auth_path):
-            yt_auth_path = None
-        yt_service = YTMusicService(yt_auth_path)
         
         tasks.update_task(task_id, status="running", message="Fetching tracks...")
         
@@ -380,47 +381,68 @@ def _import_spotify_playlist_task(task_id: str, user_id: int, playlist_id: str):
         tasks.update_task(task_id, total=total, message=f"Importing {total} tracks...")
 
         # 1. Pre-load existing track IDs to avoid DB hits inside loop
-        existing_tracks = {
-            t.external_id: t for t in db.query(schema.Track).filter(schema.Track.owner_id == user_id).all()
-            if t.external_id
-        }
+        import re
+        def norm(s):
+            return re.sub(r'[^a-z0-9]', '', str(s).lower()) if s else ""
+
+        all_existing_tracks = db.query(schema.Track).filter(schema.Track.owner_id == user_id).all()
+        existing_tracks_by_ext = {t.external_id: t for t in all_tracks if getattr(t, 'external_id', None)}
+        existing_tracks_by_uri = {t.spotify_uri: t for t in all_tracks if getattr(t, 'spotify_uri', None)}
+        
+        existing_tracks_by_name = {}
+        for t in all_existing_tracks:
+            nt, na = norm(t.title), norm(t.artist)
+            if nt: existing_tracks_by_name[(nt, na)] = t
         
         imported = 0
         chunk_size = 50 # Larger chunk for fewer commits
         for i in range(0, total, chunk_size):
             chunk = all_tracks[i:i+chunk_size]
-            current_batch = []
             for item in chunk:
-                track_data = item.get("track")
-                if not track_data: continue
-                
-                title = track_data.get("name")
-                artists = ", ".join([a.get("name") for a in track_data.get("artists", [])])
-                ext_id = track_data.get("id")
-                
-                t = existing_tracks.get(ext_id)
-                if not t:
-                    thumb = None
-                    if track_data.get("album", {}).get("images"):
-                        thumb = track_data["album"]["images"][0].get("url")
+                try:
+                    track_data = item.get("track")
+                    if not track_data: continue
+                    
+                    title = track_data.get("name")
+                    artists = ", ".join([a.get("name") for a in track_data.get("artists", [])])
+                    ext_id = track_data.get("id")
+                    uri = track_data.get("uri")
+                    
+                    nt, na = norm(title), norm(artist)
+                    
+                    # 1. Match by External ID or URI
+                    t = existing_tracks_by_ext.get(ext_id) or existing_tracks_by_uri.get(uri)
+                    
+                    # 2. Match by Name/Artist (Cross-platform)
+                    if not t and nt and (nt, na) in existing_tracks_by_name:
+                        t = existing_tracks_by_name[(nt, na)]
+                        
+                    if not t:
+                        thumb = None
+                        if track_data.get("album", {}).get("images"):
+                            thumb = track_data["album"]["images"][0].get("url")
 
-                    t = schema.Track(
-                        title=title, artist=artists, external_id=ext_id, source="spotify", 
-                        owner_id=user.id, spotify_uri=track_data.get("uri"),
-                        duration_ms=track_data.get("duration_ms"),
-                        thumbnail_url=thumb,
-                        album=track_data.get("album", {}).get("name")
-                    )
-                    db.add(t)
-                    db.flush() # Flush to get ID
-                    existing_tracks[ext_id] = t
-                current_batch.append(t)
-                imported += 1
+                        t = schema.Track(
+                            title=title, artist=artists, external_id=ext_id, source="spotify", 
+                            owner_id=user.id, spotify_uri=uri,
+                            duration_ms=track_data.get("duration_ms"),
+                            thumbnail_url=thumb,
+                            album=track_data.get("album", {}).get("name")
+                        )
+                        db.add(t)
+                        db.flush() # Flush to get ID
+                        existing_tracks_by_ext[ext_id] = t
+                        if nt: existing_tracks_by_name[(nt, na)] = t
+                    else:
+                        # Update existing track with Spotify metadata if missing
+                        if not t.spotify_uri: t.spotify_uri = uri
+                        if not t.external_id: t.external_id = ext_id
+
+                    imported += 1
+                except Exception as e:
+                    print(f"Skipping malformed spotify track: {e}")
+                    continue
             
-            # Deep Enrichment for this chunk - Using pre-initialized services
-            if current_batch:
-                enrich_tracks_chunk(db, current_batch, user_id, include_lyrics=True, spotify_client=client, yt_service=yt_service)
-                
             tasks.update_task(task_id, progress=imported)
             db.commit()
         tasks.update_task(task_id, status="completed", message=f"Successfully imported {imported} tracks.")

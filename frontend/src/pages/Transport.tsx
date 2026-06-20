@@ -109,7 +109,7 @@ export default function Transport() {
           message: task.message + (task.total ? ` (${task.progress} / ${task.total})` : '')
         });
 
-        setTimeout(poll, 3000);
+        setTimeout(poll, 5000);
       } catch (err) {
         console.error('Polling error:', err);
         setExporting(false);

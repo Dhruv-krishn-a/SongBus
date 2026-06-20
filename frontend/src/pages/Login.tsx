@@ -22,10 +22,17 @@ export default function Login() {
         body: JSON.stringify({ email, password }),
       });
 
-      const data = await response.json();
+      let data;
+      const contentType = response.headers.get('content-type');
+      if (contentType && contentType.includes('application/json')) {
+        data = await response.json();
+      } else {
+        const text = await response.text();
+        throw new Error(`Server Error: ${response.status} - ${text.substring(0, 100)}`);
+      }
       
       if (!response.ok) {
-        throw new Error(data.detail || 'Authentication failed');
+        throw new Error(data?.detail || 'Authentication failed');
       }
 
       if (isRegistering) {

@@ -38,6 +38,29 @@ class SpotifyService:
     def get_client_from_token(self, token_info: dict):
         return spotipy.Spotify(auth=token_info.get("access_token"))
 
+    async def async_get_app_token(self, client: httpx.AsyncClient):
+        if not self.client_id or not self.client_secret:
+            return None
+            
+        import base64
+        auth_str = f"{self.client_id}:{self.client_secret}"
+        b64_auth_str = base64.b64encode(auth_str.encode()).decode()
+        
+        headers = {
+            "Authorization": f"Basic {b64_auth_str}",
+            "Content-Type": "application/x-www-form-urlencoded"
+        }
+        data = {"grant_type": "client_credentials"}
+        
+        try:
+            response = await client.post("https://accounts.spotify.com/api/token", headers=headers, data=data)
+            if response.status_code == 200:
+                return response.json().get("access_token")
+            return None
+        except Exception as e:
+            print(f"Spotify App Token Error: {e}")
+            return None
+
     def get_valid_client(self, user: schema.User, db: Session):
         """
         Returns an authenticated Spotify client, refreshing the token if expired.
@@ -97,10 +120,17 @@ class SpotifyService:
             return None
 
     def create_playlist(self, client: spotipy.Spotify, user_id: str, name: str, description: str = ""):
+        if not user_id:
+            try:
+                user_id = client.me().get("id")
+            except Exception as e:
+                print(f"Error fetching Spotify profile: {e}")
+                raise e
         try:
             return client.user_playlist_create(user=user_id, name=name, public=False, description=description)
-        except Exception:
-            return None
+        except Exception as e:
+            print(f"Spotify create_playlist failed for user {user_id}: {e}")
+            raise e
 
     def add_tracks_to_playlist(self, client: spotipy.Spotify, playlist_id: str, track_uris: list):
         # Spotify allows max 100 tracks per request
@@ -116,36 +146,44 @@ class SpotifyService:
         if existing_uri:
             return existing_uri
 
-        query = f"track:{title} artist:{artist}"
+        queries = [
+            f"track:{title} artist:{artist}", # Strict
+            f"{title} {artist}"               # Loose fallback
+        ]
+        
         try:
-            response = await client.get(
-                "https://api.spotify.com/v1/search",
-                params={"q": query, "type": "track", "limit": 5},
-                headers={"Authorization": f"Bearer {token}"}
-            )
-            if response.status_code == 200:
-                results = response.json()
-                candidates = results.get("tracks", {}).get("items", [])
+            best_match = None
+            for query in queries:
+                response = await client.get(
+                    "https://api.spotify.com/v1/search",
+                    params={"q": query, "type": "track", "limit": 5},
+                    headers={"Authorization": f"Bearer {token}"}
+                )
+                if response.status_code == 200:
+                    results = response.json()
+                    candidates = results.get("tracks", {}).get("items", [])
+                    
+                    for cand in candidates:
+                        if duration_ms:
+                            duration_diff = abs(cand['duration_ms'] - duration_ms)
+                            if duration_diff > 15000: # 15s tolerance for remixes/YouTube rips
+                                continue
+                        
+                        title_lower = cand['name'].lower()
+                        if "live" in title_lower or "karaoke" in title_lower:
+                            if "live" not in title.lower():
+                                continue
+                        
+                        best_match = cand['uri']
+                        break
+                        
+                elif response.status_code == 429:
+                    await asyncio.sleep(int(response.headers.get("Retry-After", 2)))
                 
-                best_match = None
-                for cand in candidates:
-                    if duration_ms:
-                        duration_diff = abs(cand['duration_ms'] - duration_ms)
-                        if duration_diff > 10000:
-                            continue
-                    
-                    title_lower = cand['name'].lower()
-                    if "live" in title_lower or "karaoke" in title_lower:
-                        if "live" not in title.lower():
-                            continue
-                    
-                    best_match = cand['uri']
+                if best_match:
                     break
                     
-                return best_match
-            elif response.status_code == 429:
-                await asyncio.sleep(int(response.headers.get("Retry-After", 2)))
-            return None
+            return best_match
         except Exception:
             return None
 

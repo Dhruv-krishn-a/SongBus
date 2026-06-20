@@ -82,14 +82,14 @@ def get_valid_youtube_access_token(current_user: schema.User, db: Session) -> st
 def fetch_liked_videos_response(access_token: str, page_token: str | None = None) -> Response:
     params = {
         "part": "snippet,contentDetails",
-        "myRating": "like",
+        "playlistId": "LM",
         "maxResults": 50,
     }
     if page_token:
         params["pageToken"] = page_token
 
     return requests.get(
-        "https://www.googleapis.com/youtube/v3/videos",
+        "https://www.googleapis.com/youtube/v3/playlistItems",
         params=params,
         headers={"Authorization": f"Bearer {access_token}"},
         timeout=20,
@@ -176,16 +176,18 @@ def get_ytmusic_oauth_client(current_user: schema.User) -> YTMusic:
 
 
 def serialize_ytmusic_track(track: dict) -> dict:
-    artists = ", ".join(artist.get("name", "") for artist in track.get("artists", []) if artist.get("name"))
-    album = track.get("album", {})
-    thumbnails = track.get("thumbnails", [])
+    artists_list = track.get("artists") or []
+    artists = ", ".join(a.get("name", "") for a in artists_list if isinstance(a, dict) and a.get("name"))
+    
+    album_data = track.get("album") or {}
+    thumbnails = track.get("thumbnails") or []
     thumbnail_url = thumbnails[-1].get("url") if thumbnails else None
     
     return {
         "videoId": track.get("videoId"),
         "title": track.get("title", "Unknown Title"),
         "artist": artists or "Unknown Artist",
-        "album": album.get("name") if isinstance(album, dict) else None,
+        "album": album_data.get("name") if isinstance(album_data, dict) else None,
         "duration_ms": (track.get("duration_seconds") or 0) * 1000 or None,
         "thumbnail_url": thumbnail_url,
     }
@@ -219,30 +221,6 @@ def collect_liked_videos(
         
         for item in payload.get("items", []):
             fetched_count += 1
-            snippet = item.get("snippet", {})
-            
-            if music_only:
-                cat_id = snippet.get("categoryId")
-                is_music = (cat_id == "10") # 10 is the official Music category
-                
-                # If not strictly categorized as music, check titles and channels for strong signals
-                if not is_music:
-                    title = snippet.get("title", "").lower()
-                    channel = snippet.get("channelTitle", "").lower()
-                    
-                    music_title_keywords = [
-                        "official video", "music video", "official audio", 
-                        "lyric", "live performance", "feat.", "ft.", "official visualizer"
-                    ]
-                    music_channel_keywords = ["vevo", " - topic"]
-                    
-                    if any(k in title for k in music_title_keywords) or \
-                       any(k in channel for k in music_channel_keywords):
-                        is_music = True
-                
-                if not is_music:
-                    continue
-
             items.append(item)
 
         if task_id:
@@ -391,8 +369,6 @@ def list_youtube_playlists(current_user: schema.User = Depends(get_current_user)
 
 def _import_playlist_task(task_id: str, playlist_id: str, user_id: int):
     from app.services.spotify import SpotifyService
-    from app.api.integrations import get_ytmusic_browser_auth_path
-    from app.services.ytmusic import YTMusicService
 
     db = SessionLocal()
     try:
@@ -402,36 +378,38 @@ def _import_playlist_task(task_id: str, playlist_id: str, user_id: int):
             tasks.update_task(task_id, status="failed", error="User not found")
             return
 
-        # Initialize Services ONCE
-        spotify_service = SpotifyService()
-        spotify_client = None
-        if current_user.spotify_access_token:
-            try:
-                spotify_client = spotify_service.get_valid_client(current_user, db)
-            except Exception: pass
-            
-        yt_auth_path = get_ytmusic_browser_auth_path()
-        if not os.path.exists(yt_auth_path):
-            yt_auth_path = None
-        yt_service = YTMusicService(yt_auth_path)
-
         # Pre-load existing data for this user to minimize DB hits
-        existing_tracks = {
-            t.external_id: t for t in db.query(schema.Track).filter(schema.Track.owner_id == current_user.id).all()
-            if t.external_id
-        }
+        all_tracks = db.query(schema.Track).filter(schema.Track.owner_id == current_user.id).all()
+        existing_tracks_by_ext = {t.external_id: t for t in all_tracks if t.external_id}
+        
+        def norm(s):
+            return re.sub(r'[^a-z0-9]', '', str(s).lower()) if s else ""
+            
+        existing_tracks_by_name = {}
+        for t in all_tracks:
+            nt, na = norm(t.title), norm(t.artist)
+            if nt: existing_tracks_by_name[(nt, na)] = t
 
         def get_or_create_track(title, artist, album, duration_ms, ext_id, thumbnail_url=None):
-            if ext_id in existing_tracks:
-                t = existing_tracks[ext_id]
-                if not t.album and album:
-                    t.album = album
-                if not t.duration_ms and duration_ms:
-                    t.duration_ms = duration_ms
-                if not t.thumbnail_url and thumbnail_url:
-                    t.thumbnail_url = thumbnail_url
+            # 1. Match by external ID
+            if ext_id in existing_tracks_by_ext:
+                t = existing_tracks_by_ext[ext_id]
+                if not t.album and album: t.album = album
+                if not t.duration_ms and duration_ms: t.duration_ms = duration_ms
+                if not t.thumbnail_url and thumbnail_url: t.thumbnail_url = thumbnail_url
+                if not t.matched_youtube_id: t.matched_youtube_id = ext_id
                 return t, False
 
+            # 2. Match by normalized Title and Artist (Cross-Platform Match)
+            nt, na = norm(title), norm(artist)
+            if nt and (nt, na) in existing_tracks_by_name:
+                t = existing_tracks_by_name[(nt, na)]
+                if not t.matched_youtube_id: t.matched_youtube_id = ext_id
+                if not t.external_id and not t.spotify_uri:
+                    t.external_id = ext_id
+                return t, False
+
+            # 3. Create New Track
             t = schema.Track(
                 title=title,
                 artist=artist or "Unknown Artist",
@@ -439,12 +417,13 @@ def _import_playlist_task(task_id: str, playlist_id: str, user_id: int):
                 duration_ms=duration_ms,
                 thumbnail_url=thumbnail_url,
                 external_id=ext_id,
+                matched_youtube_id=ext_id,
                 source="youtube",
                 owner_id=current_user.id,
             )
-            # AI classification is now optional/later
             db.add(t)
-            existing_tracks[ext_id] = t
+            existing_tracks_by_ext[ext_id] = t
+            if nt: existing_tracks_by_name[(nt, na)] = t
             return t, True
 
         imported_count = 0
@@ -473,44 +452,65 @@ def _import_playlist_task(task_id: str, playlist_id: str, user_id: int):
                     tasks.update_task(task_id, progress=processed_count, message=f"Processing {processed_count}/{len(items)}")
                     db.flush()
 
-                snippet = item.get("snippet", {})
-                content_details = item.get("contentDetails", {})
-                video_id = item.get("id")
-                if not video_id:
+                try:
+                    snippet = item.get("snippet", {})
+                    content_details = item.get("contentDetails", {})
+                    
+                    # Fetching via playlistItems puts ID inside resourceId
+                    video_id = snippet.get("resourceId", {}).get("videoId")
+                    if not video_id:
+                        continue
+
+                    if video_id in processed_video_ids:
+                        continue
+                    processed_video_ids.add(video_id)
+
+                    title = snippet.get("title", "Unknown Title")
+                    artist = snippet.get("videoOwnerChannelTitle") or snippet.get("channelTitle") or "Unknown Artist"
+                    duration_ms = duration_to_ms(content_details.get("duration"))
+                    
+                    # Non-song exclusion logic
+                    title_lower = title.lower()
+                    if duration_ms:
+                        if duration_ms < 60000 or duration_ms > 900000: # < 1 min or > 15 min
+                            continue
+                            
+                    exclusion_keywords = [
+                        "karaoke", "instrumental", "slowed", "reverb", "parody", 
+                        "reaction", "mashup", "tutorial", "how to play", "guitar lesson", 
+                        "piano lesson", "bass cover", "podcast", "episode"
+                    ]
+                    if any(k in title_lower for k in exclusion_keywords):
+                        continue
+
+                    thumbnails = snippet.get("thumbnails", {})
+                    thumb = thumbnails.get("high") or thumbnails.get("medium") or thumbnails.get("default")
+                    thumb_url = thumb.get("url") if thumb else None
+
+                    track, created = get_or_create_track(
+                        title, artist, None, duration_ms, video_id, thumb_url
+                    )
+                    if created:
+                        imported_count += 1
+                    
+                    current_batch.append(track)
+
+                    if getattr(track, "id", None) not in existing_links:
+                        db.add(schema.PlaylistTrack(playlist_id=local_playlist.id, track_id=track.id))
+                        if getattr(track, "id", None) is not None:
+                            existing_links.add(track.id)
+                        linked_count += 1
+
+                    if len(current_batch) >= 50:
+                        db.flush()
+                        current_batch = []
+                        db.commit()
+                except Exception as e:
+                    print(f"Skipping malformed track {item.get('id')}: {e}")
                     continue
-
-                if video_id in processed_video_ids:
-                    continue
-                processed_video_ids.add(video_id)
-
-                thumbnails = snippet.get("thumbnails", {})
-                thumb = thumbnails.get("high") or thumbnails.get("medium") or thumbnails.get("default")
-                thumb_url = thumb.get("url") if thumb else None
-
-                track, created = get_or_create_track(
-                    snippet.get("title", "Unknown Title"), snippet.get("channelTitle"), None,
-                    duration_to_ms(content_details.get("duration")), video_id, thumb_url
-                )
-                if created:
-                    imported_count += 1
-                
-                current_batch.append(track)
-
-                if getattr(track, "id", None) not in existing_links:
-                    db.add(schema.PlaylistTrack(playlist_id=local_playlist.id, track=track))
-                    if getattr(track, "id", None) is not None:
-                        existing_links.add(track.id)
-                    linked_count += 1
-
-                if len(current_batch) >= 50:
-                    db.flush()
-                    enrich_tracks_chunk(db, current_batch, user_id, include_lyrics=True, spotify_client=spotify_client, yt_service=yt_service)
-                    current_batch = []
-                    db.commit()
             
             if current_batch:
                 db.flush()
-                enrich_tracks_chunk(db, current_batch, user_id, include_lyrics=True, spotify_client=spotify_client, yt_service=yt_service)
                 db.commit()
 
         else:
@@ -570,39 +570,58 @@ def _import_playlist_task(task_id: str, playlist_id: str, user_id: int):
                     tasks.update_task(task_id, progress=processed_count, message=f"Processing {processed_count}/{len(video_ids)}")
                     db.flush()
 
-                item = playlist_item_lookup[video_id]
-                detail = video_details.get(video_id, {})
-                snippet = detail.get("snippet") or item.get("snippet", {})
-                content_details = detail.get("contentDetails", {})
+                try:
+                    item = playlist_item_lookup[video_id]
+                    detail = video_details.get(video_id, {})
+                    snippet = detail.get("snippet") or item.get("snippet", {})
+                    content_details = detail.get("contentDetails", {})
 
-                thumbnails = snippet.get("thumbnails", {})
-                thumb = thumbnails.get("high") or thumbnails.get("medium") or thumbnails.get("default")
-                thumb_url = thumb.get("url") if thumb else None
+                    title = snippet.get("title", "Unknown Title")
+                    artist = snippet.get("videoOwnerChannelTitle") or snippet.get("channelTitle") or "Unknown Artist"
+                    duration_ms = duration_to_ms(content_details.get("duration"))
 
-                track, created = get_or_create_track(
-                    snippet.get("title", "Unknown Title"), snippet.get("videoOwnerChannelTitle") or snippet.get("channelTitle"), None,
-                    duration_to_ms(content_details.get("duration")), video_id, thumb_url
-                )
-                if created:
-                    imported_count += 1
-                
-                current_batch.append(track)
+                    # Non-song exclusion logic
+                    title_lower = title.lower()
+                    if duration_ms:
+                        if duration_ms < 60000 or duration_ms > 900000: # < 1 min or > 15 min
+                            continue
+                            
+                    exclusion_keywords = [
+                        "karaoke", "instrumental", "slowed", "reverb", "parody", 
+                        "reaction", "mashup", "tutorial", "how to play", "guitar lesson", 
+                        "piano lesson", "bass cover", "podcast", "episode"
+                    ]
+                    if any(k in title_lower for k in exclusion_keywords):
+                        continue
 
-                if getattr(track, "id", None) not in existing_links:
-                    db.add(schema.PlaylistTrack(playlist_id=local_playlist.id, track=track))
-                    if getattr(track, "id", None) is not None:
-                        existing_links.add(track.id)
-                    linked_count += 1
-                
-                if len(current_batch) >= 50:
-                    db.flush()
-                    enrich_tracks_chunk(db, current_batch, user_id, include_lyrics=True, spotify_client=spotify_client, yt_service=yt_service)
-                    current_batch = []
-                    db.commit()
+                    thumbnails = snippet.get("thumbnails", {})
+                    thumb = thumbnails.get("high") or thumbnails.get("medium") or thumbnails.get("default")
+                    thumb_url = thumb.get("url") if thumb else None
+
+                    track, created = get_or_create_track(
+                        title, artist, None, duration_ms, video_id, thumb_url
+                    )
+                    if created:
+                        imported_count += 1
+                    
+                    current_batch.append(track)
+
+                    if getattr(track, "id", None) not in existing_links:
+                        db.add(schema.PlaylistTrack(playlist_id=local_playlist.id, track_id=track.id))
+                        if getattr(track, "id", None) is not None:
+                            existing_links.add(track.id)
+                        linked_count += 1
+                    
+                    if len(current_batch) >= 50:
+                        db.flush()
+                        current_batch = []
+                        db.commit()
+                except Exception as e:
+                    print(f"Skipping malformed playlist track {video_id}: {e}")
+                    continue
             
             if current_batch:
                 db.flush()
-                enrich_tracks_chunk(db, current_batch, user_id, include_lyrics=True, spotify_client=spotify_client, yt_service=yt_service)
                 db.commit()
 
         db.commit()
@@ -641,7 +660,7 @@ def import_youtube_playlist(
     return {"task_id": task_id, "message": "Import started in background"}
 @router.post("/youtube/import")
 def import_youtube_library(current_user: schema.User = Depends(get_current_user), db: Session = Depends(get_db)):
-    """Imports liked YouTube videos using the official Google API."""
+    """Imports liked YouTube videos using the official Google API via the LM playlist."""
     try:
         access_token = get_valid_youtube_access_token(current_user, db)
         imported_count = 0
@@ -665,10 +684,9 @@ def import_youtube_library(current_user: schema.User = Depends(get_current_user)
                 processed_count += 1
                 snippet = item.get("snippet", {})
                 content_details = item.get("contentDetails", {})
-                video_id = item.get("id")
-
-                if snippet.get("categoryId") and snippet.get("categoryId") != "10":
-                    continue
+                
+                # Fetching via playlistItems puts ID inside resourceId
+                video_id = snippet.get("resourceId", {}).get("videoId")
 
                 if not video_id or not snippet.get("title"):
                     continue
@@ -681,18 +699,19 @@ def import_youtube_library(current_user: schema.User = Depends(get_current_user)
                 if existing:
                     continue
 
+                thumbnails = snippet.get("thumbnails", {})
+                thumb = thumbnails.get("high") or thumbnails.get("medium") or thumbnails.get("default")
+
                 new_track = schema.Track(
                     title=snippet["title"],
-                    artist=snippet.get("channelTitle", "Unknown Artist"),
+                    artist=snippet.get("videoOwnerChannelTitle") or snippet.get("channelTitle") or "Unknown Artist",
                     album=None,
                     duration_ms=duration_to_ms(content_details.get("duration")),
                     external_id=video_id,
+                    thumbnail_url=thumb.get("url") if thumb else None,
                     source="youtube",
                     owner_id=current_user.id
                 )
-                new_track.genre = AnalysisEngine.classify_genre(new_track)
-                new_track.mood = AnalysisEngine.classify_mood(new_track)
-
                 db.add(new_track)
                 imported_count += 1
 

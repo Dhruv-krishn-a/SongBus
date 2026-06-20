@@ -1,15 +1,20 @@
+import os
+import requests
+from datetime import datetime, timedelta
 from ytmusicapi import YTMusic
+from sqlalchemy.orm import Session
+from app.models import schema
 
 class YTMusicService:
-    def __init__(self, headers_auth: str = None):
+    def __init__(self, headers_auth: str = None, access_token: str = None):
         """
         Initialize the YouTube Music API client.
-        For MVP, users might provide headers_auth JSON string 
-        to access their personal library, or we can use OAuth.
+        We can use access_token directly for OAuth Custom Full mode.
         """
-        if headers_auth:
+        if access_token:
+            self.client = YTMusic({"authorization": f"Bearer {access_token}"})
+        elif headers_auth:
             # Load from string or file depending on ytmusicapi implementation
-            # For simplicity, if headers_auth is a path to a json file:
             try:
                 self.client = YTMusic(headers_auth)
             except Exception:
@@ -17,6 +22,38 @@ class YTMusicService:
                 self.client = YTMusic()
         else:
             self.client = YTMusic()
+
+    @staticmethod
+    def get_valid_client(user: schema.User, db: Session) -> 'YTMusicService':
+        """
+        Returns an authenticated YTMusicService instance, refreshing the token if expired.
+        """
+        if not user.yt_access_token:
+            return YTMusicService()
+
+        now = datetime.utcnow()
+        if user.yt_token_expiry and now >= (user.yt_token_expiry - timedelta(minutes=5)):
+            client_id = os.getenv("YTMUSIC_OAUTH_CLIENT_ID")
+            client_secret = os.getenv("YTMUSIC_OAUTH_CLIENT_SECRET")
+            if client_id and client_secret and user.yt_refresh_token:
+                token_url = "https://oauth2.googleapis.com/token"
+                payload = {
+                    "client_id": client_id,
+                    "client_secret": client_secret,
+                    "refresh_token": user.yt_refresh_token,
+                    "grant_type": "refresh_token",
+                }
+                res = requests.post(token_url, data=payload)
+                if res.status_code == 200:
+                    tokens = res.json()
+                    user.yt_access_token = tokens.get("access_token")
+                    if tokens.get("refresh_token"):
+                        user.yt_refresh_token = tokens.get("refresh_token")
+                    expires_in = tokens.get("expires_in", 3600)
+                    user.yt_token_expiry = datetime.utcnow() + timedelta(seconds=expires_in)
+                    db.commit()
+
+        return YTMusicService(access_token=user.yt_access_token)
 
     def get_liked_songs(self, limit: int = 100):
         """

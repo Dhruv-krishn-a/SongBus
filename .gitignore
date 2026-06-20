@@ -1,10 +1,12 @@
-# Python
+# Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
 .Python
-env/
+
+# Distribution / packaging
+bin/
 build/
 develop-eggs/
 dist/
@@ -17,40 +19,83 @@ parts/
 sdist/
 var/
 wheels/
+share/python-wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+MANIFEST
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nosexy
+.coverage
+.coverage.*
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+.ruff_cache/
+
+# Environments & Secrets
+.env
+.venv
+env/
 venv/
 ENV/
+env.bak/
+venv.bak/
+backend/.env
+!backend/.env.example
 
-# Node / React
+# Node / Frontend
 node_modules/
 frontend/node_modules/
 frontend/dist/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+.pnpm-debug.log*
+.eslintcache
+.stylelintcache
 
-# Databases
+# Local databases, Redis, & Logs
 *.db
+*.db-journal
+*.db-shm
+*.db-wal
+*.sqlite
 *.sqlite3
-backend/playlistiq.db
+dump.rdb
+*.log
 
-# Environments / Secrets
-.env
-backend/.env
-backend/.env.example
-!backend/.env.example
+# Spotify Auth Cache files
+.cache*
+backend/.cache*
+*.cache
+
+# YouTube/Google OAuth credentials
 browser.json
 backend/browser.json
+backend/tmp_oauth.json
 
-# IDEs
+# IDEs and Editors
 .vscode/
 .idea/
 *.swp
 *.swo
+*~
+.project
+.pydevproject
+.settings/
 
-# OS
+# OS metadata
 .DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
 Thumbs.db
-backend/tmp_oauth.json

@@ -87,7 +87,7 @@ export default function Settings() {
            active: true
         });
 
-        setTimeout(poll, 3000);
+        setTimeout(poll, 5000);
       } catch (err) {
         console.error('Polling error:', err);
         setEnrichProgress(null);

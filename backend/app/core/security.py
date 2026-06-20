@@ -30,6 +30,6 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
 def get_password_hash(password: str) -> str:
     # Truncate to 72 bytes as required by bcrypt to avoid ValueError
     pwd_bytes = password.encode('utf-8')[:72]
-    salt = bcrypt.gensalt()
+    salt = bcrypt.gensalt(rounds=10)
     hashed_bytes = bcrypt.hashpw(pwd_bytes, salt)
     return hashed_bytes.decode('utf-8')

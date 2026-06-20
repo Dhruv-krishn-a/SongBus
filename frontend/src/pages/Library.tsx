@@ -4,7 +4,7 @@ import {
   Wand2, X, Check, Search, ChevronLeft, ChevronRight, 
   Music2, Clock, Trash2, ArrowUp, ArrowDown, 
   AlertCircle, Info, CheckCircle2, RefreshCw, Loader2, Brain,
-  Activity, Zap, Mic, Globe
+  Activity, Zap, Mic, Globe, Sparkles
 } from 'lucide-react';
 
 const PAGE_SIZE = 12;
@@ -18,6 +18,9 @@ type Track = {
   thumbnail_url?: string | null;
   genre?: string | null;
   mood?: string | null;
+  themes?: string | null;
+  emotions?: string | null;
+  contexts?: string | null;
   source?: string | null;
   created_at?: string | null;
   // Deep Data
@@ -34,7 +37,7 @@ type YouTubePlaylist = {
   id: string;
   title: string;
   description?: string;
-  track_count: number;
+  track_count: number | string;
   source?: string;
 };
 
@@ -80,6 +83,7 @@ const Library = () => {
   
   const [status, setStatus] = useState({ spotify_connected: false, youtube_connected: false });
   const [importing, setImporting] = useState(false);
+  const [isCleaning, setIsCleaning] = useState(false);
   const [page, setPage] = useState(1);
   const [total, setTotal] = useState(0);
   const [totalPages, setTotalPages] = useState(0);
@@ -224,63 +228,121 @@ const Library = () => {
     localStorage.setItem('yt_selected_id', id);
   };
 
-  const fetchTracks = useCallback((targetPage = page) => {
+  const fetchTracks = useCallback(async (targetPage = page, silent = false) => {
     if (!token) return;
-
-    const timeoutId = setTimeout(() => setLoading(true), 0);
-    let url = `/api/music/library?page=${targetPage}&page_size=${PAGE_SIZE}&sort_by=${sortBy}&sort_order=${sortOrder}`;
-    if (debouncedSearch) url += `&search=${encodeURIComponent(debouncedSearch)}`;
-    if (artistFilter) url += `&artist=${encodeURIComponent(artistFilter)}`;
-    if (genreFilter) url += `&genre=${encodeURIComponent(genreFilter)}`;
-    if (moodFilter) url += `&mood=${encodeURIComponent(moodFilter)}`;
-    
-    // Platform Tab Filtering
-    if (activeTab === 'youtube') url += `&source=youtube`;
-    if (activeTab === 'spotify') url += `&source=spotify`;
-
-    fetch(url, {
-      headers: { Authorization: `Bearer ${token}` }
-    })
-      .then(res => res.json())
-      .then(data => {
-        setTracks(data.tracks || []);
-        setPage(data.page || targetPage);
-        setTotal(data.total || 0);
-        setTotalPages(data.total_pages || 0);
-      })
-      .catch(console.error)
-      .finally(() => {
-        clearTimeout(timeoutId);
-        setLoading(false);
+    if (!silent) setLoading(true);
+    try {
+      const q = new URLSearchParams({
+        page: targetPage.toString(),
+        page_size: PAGE_SIZE.toString(),
+        sort_by: sortBy,
+        sort_order: sortOrder
       });
+      if (debouncedSearch) q.append('search', debouncedSearch);
+      if (artistFilter) q.append('artist', artistFilter);
+      if (genreFilter) q.append('genre', genreFilter);
+      if (moodFilter) q.append('mood', moodFilter);
+      if (activeTab === 'youtube') q.append('source', 'youtube');
+      if (activeTab === 'spotify') q.append('source', 'spotify');
+
+      const res = await fetch(`/api/music/library?${q}`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (!res.ok) throw new Error('Failed to fetch');
+      const data = await res.json();
+      setTracks(data.tracks || []);
+      setTotal(data.total || 0);
+      setTotalPages(data.total_pages || 0);
+      setPage(data.page || targetPage);
+    } catch (err) {
+      console.error(err);
+    } finally {
+      if (!silent) setLoading(false);
+    }
   }, [token, page, debouncedSearch, artistFilter, genreFilter, moodFilter, sortBy, sortOrder, activeTab]);
 
   const handlePageChange = (newPage: number) => {
     setPage(newPage);
-    fetchTracks(newPage);
   };
 
+  useEffect(() => {
+    if (token) {
+      fetchTracks(page);
+    }
+    const interval = setInterval(() => {
+      fetchTracks(page, true);
+    }, 10000);
+    return () => clearInterval(interval);
+  }, [fetchTracks, page, token]);
+  const [enriching, setEnriching] = useState(false);
+
+  useEffect(() => {
+    if (selectedTrack) {
+      const needsLyrics = !selectedTrack.lyrics && !selectedTrack.lyrics_not_found;
+      const needsClassification = !selectedTrack.genre || !selectedTrack.mood;
+      
+      if (needsLyrics || needsClassification) {
+        let isMounted = true;
+        const enrichTrack = async () => {
+          if (isMounted) setEnriching(true);
+          try {
+            const res = await fetch(`/api/music/tracks/${selectedTrack.id}/enrich`, {
+              headers: { Authorization: `Bearer ${token}` }
+            });
+            if (res.ok) {
+              const updatedTrack = await res.json();
+              if (isMounted) {
+                setSelectedTrack((prev: any) => prev?.id === updatedTrack.id ? updatedTrack : prev);
+                setTracks((prev) => prev.map(t => t.id === updatedTrack.id ? updatedTrack : t));
+              }
+            }
+          } catch (e) {
+            console.error("Failed to enrich track", e);
+          } finally {
+            if (isMounted) setEnriching(false);
+          }
+        };
+        enrichTrack();
+        return () => { isMounted = false; };
+      }
+    }
+  }, [selectedTrack?.id, token]);
+
+  const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
+  const [lyricsTaskStatus, setLyricsTaskStatus] = useState<{message: string, progress: number, total: number} | null>(null);
+
   const pollTask = useCallback(async (taskId: string) => {
+    if (!taskId) return;
+    setActiveTaskId(taskId);
+    
+    let isMounted = true;
     const poll = async () => {
+      if (!isMounted) return;
       try {
         const res = await fetch(`/api/tasks/${taskId}`, {
           headers: { Authorization: `Bearer ${token}` }
         });
+        
         if (!res.ok) {
            setImporting(false);
+           setActiveTaskId(null);
+           setLyricsTaskStatus(null);
            return;
         }
+        
         const task = await res.json();
 
         if (task.status === 'completed') {
           setModal({
             show: true,
             type: 'success',
-            title: 'Sync Complete',
-            message: `${task.result?.message || 'Sync finished.'}`
+            title: 'Complete',
+            message: `${task.result?.message || task.message || 'Finished successfully.'}`
           });
           setImporting(false);
-          handlePageChange(1);
+          setActiveTaskId(null);
+          setLyricsTaskStatus(null);
+          fetchTracks(1, false); 
           return;
         }
 
@@ -288,28 +350,40 @@ const Library = () => {
           setModal({
             show: true,
             type: 'error',
-            title: 'Sync Failed',
+            title: 'Failed',
             message: task.error || 'Something went wrong.'
           });
           setImporting(false);
+          setActiveTaskId(null);
+          setLyricsTaskStatus(null);
           return;
         }
 
-        setModal({
-          show: true,
-          type: 'info',
-          title: task.name + ' in Progress',
-          message: task.message + (task.total ? ` (${task.progress} / ${task.total})` : '')
-        });
+        if (task.name === 'Fetch Lyrics') {
+          setLyricsTaskStatus({ message: task.message, progress: task.progress, total: task.total });
+        } else {
+          setModal({
+            show: true,
+            type: 'info',
+            title: task.name + ' in Progress',
+            message: task.message + (task.total ? ` (${task.progress} / ${task.total})` : '')
+          });
+        }
+        
+        // Silently update the library table in the background so user sees tracks appearing
+        if (isMounted) fetchTracks(page, true);
 
-        setTimeout(poll, 3000);
+        if (isMounted) setTimeout(poll, 2000);
       } catch (err) {
         console.error('Polling error:', err);
         setImporting(false);
+        setActiveTaskId(null);
+        setLyricsTaskStatus(null);
       }
     };
     poll();
-  }, [token, handlePageChange]);
+    return () => { isMounted = false; };
+  }, [token, fetchTracks, page]);
 
   useEffect(() => {
     fetchStatus();
@@ -321,15 +395,14 @@ const Library = () => {
       .then(data => {
         if (data.tasks && data.tasks.length > 0) {
            const t = data.tasks[0];
-           // Only re-attach if it's an import/sync task relevant to this page
-           if (t.name.includes('Import') || t.name.includes('Sync')) {
+           if ((t.name.includes('Import') || t.name.includes('Sync') || t.name.includes('Lyrics')) && t.id !== activeTaskId) {
               pollTask(t.id);
            }
         }
       })
       .catch(console.error);
     }
-  }, [fetchStatus, token, pollTask]);
+  }, [fetchStatus, token, pollTask, activeTaskId]);
 
   const handleYouTubeImport = async () => {
     if (!token || !selectedPlaylistId) return;
@@ -368,6 +441,39 @@ const Library = () => {
     } catch (err: any) {
       setImporting(false);
       setModal({ show: true, type: 'error', title: 'Error', message: err.message });
+    }
+  };
+
+  const handleFetchLyrics = async () => {
+    if (!token) return;
+    setImporting(true);
+    setLyricsTaskStatus({ message: "Starting...", progress: 0, total: 0 });
+    try {
+      const res = await fetch('/api/music/fetch-lyrics', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      const data = await res.json();
+      if (res.ok && data.task_id) pollTask(data.task_id);
+      else setLyricsTaskStatus(null);
+    } catch (err) {
+      setImporting(false);
+      setLyricsTaskStatus(null);
+    }
+  };
+
+  const handleAIClassify = async () => {
+    if (!token) return;
+    setImporting(true);
+    try {
+      const res = await fetch('/api/music/classify-all', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      const data = await res.json();
+      if (res.ok && data.task_id) pollTask(data.task_id);
+    } catch (err) {
+      setImporting(false);
     }
   };
 
@@ -422,7 +528,7 @@ const Library = () => {
           return;
         }
         setModal({ show: true, type: 'info', title: 'Analyzing...', message: task.message + (task.total ? ` (${task.progress} / ${task.total})` : '') });
-        setTimeout(poll, 3000);
+        setTimeout(poll, 5000);
       } catch (err) { setIsClassifyingAi(false); }
     };
     poll();
@@ -508,11 +614,35 @@ const Library = () => {
         <div className="flex flex-wrap items-center gap-3">
           {activeTab === 'all' && (
             <>
-              <button onClick={startBatchNormalize} className="flex-1 lg:flex-none flex items-center justify-center gap-2 bg-white text-gray-900 px-5 py-3 rounded-2xl border border-gray-200 shadow-sm hover:shadow-md hover:border-primary/30 transition-all font-bold text-sm group">
-                <Wand2 className="w-4 h-4 text-primary" /> Normalize All
+              <button onClick={handleFetchLyrics} disabled={importing || !!lyricsTaskStatus} className="flex-1 lg:flex-none flex items-center justify-center gap-2 bg-white text-gray-900 px-5 py-3 rounded-2xl border border-gray-200 shadow-sm hover:shadow-md hover:border-primary/30 transition-all font-bold text-sm group disabled:opacity-50">
+                <Music2 className="w-4 h-4 text-primary" /> 
+                {lyricsTaskStatus ? 'Fetching...' : 'Get Lyrics'}
               </button>
-              <button onClick={handleClassifyAi} disabled={isClassifyingAi} className="flex-1 lg:flex-none flex items-center justify-center gap-2 bg-gray-900 text-white px-5 py-3 rounded-2xl shadow-xl shadow-gray-900/10 hover:bg-gray-800 transition-all font-bold text-sm group disabled:opacity-50">
-                {isClassifyingAi ? <Loader2 className="w-4 h-4 animate-spin" /> : <Brain className="w-4 h-4 text-primary" />} Classify
+              <button onClick={handleAIClassify} disabled={importing} className="flex-1 lg:flex-none flex items-center justify-center gap-2 bg-gray-900 text-white px-5 py-3 rounded-2xl shadow-xl shadow-gray-900/10 hover:bg-gray-800 transition-all font-bold text-sm group disabled:opacity-50">
+                <Brain className="w-4 h-4 text-primary" /> Classify (AI)
+              </button>
+              <button 
+                onClick={async () => {
+                  if(!token) return;
+                  setIsCleaning(true);
+                  try {
+                    const res = await fetch('/api/music/clean-database', { method: 'POST', headers: { 'Authorization': `Bearer ${token}` } });
+                    const data = await res.json();
+                    if(res.ok) {
+                      setModal({ show: true, type: 'success', title: 'Database Cleaned', message: data.message });
+                      fetchTracks(page, search);
+                    }
+                  } catch (e) {
+                    console.error(e);
+                  } finally {
+                    setIsCleaning(false);
+                  }
+                }}
+                disabled={importing || isCleaning} 
+                className="flex-1 lg:flex-none flex items-center justify-center gap-2 bg-red-50 text-red-600 px-5 py-3 rounded-2xl shadow-sm border border-red-100 hover:bg-red-100 transition-all font-bold text-sm group disabled:opacity-50"
+              >
+                {isCleaning ? <Loader2 className="w-4 h-4 animate-spin text-red-500" /> : <Sparkles className="w-4 h-4 text-red-500" />}
+                {isCleaning ? 'Cleaning...' : 'Clean Database'}
               </button>
             </>
           )}
@@ -526,10 +656,14 @@ const Library = () => {
                   <div className="flex-1 flex items-center px-2 min-w-0 bg-gray-50 rounded-xl h-10">
                     <Music2 className="w-4 h-4 text-primary mr-2 flex-shrink-0" />
                     <select value={selectedPlaylistId} onChange={(e) => handlePlaylistChange(e.target.value)} className="bg-transparent text-[13px] font-bold focus:outline-none w-full truncate appearance-none">
-                      {youtubePlaylists.map((p) => <option key={p.id} value={p.id}>{p.title} ({p.track_count})</option>)}
+                      {youtubePlaylists.map((p) => {
+                        const isLiked = p.id === '__liked_videos__';
+                        const countLabel = isLiked && p.track_count === 0 ? 'Ready to Import' : `${p.track_count} synced`;
+                        return <option key={p.id} value={p.id}>{p.title} ({countLabel})</option>;
+                      })}
                     </select>
                   </div>
-                  <button onClick={handleYouTubeImport} disabled={importing} className="bg-gray-900 text-white px-5 h-10 rounded-xl text-[11px] font-black uppercase tracking-wider hover:bg-gray-800 disabled:opacity-50">Scan</button>
+                  <button onClick={handleYouTubeImport} disabled={importing} className="bg-gray-900 text-white px-5 h-10 rounded-xl text-[11px] font-black uppercase tracking-wider hover:bg-gray-800 disabled:opacity-50">Import</button>
                   <button onClick={fetchYouTubePlaylists} className="p-2.5 text-gray-400 hover:text-primary rounded-xl bg-gray-50"><RefreshCw className={`w-4 h-4 ${playlistsLoading ? 'animate-spin' : ''}`} /></button>
                 </div>
               )}
@@ -549,7 +683,7 @@ const Library = () => {
                           {spotifyPlaylists.map((p) => <option key={p.id} value={p.id}>{p.title} ({p.track_count})</option>)}
                         </select>
                       </div>
-                      <button onClick={handleSpotifyImport} disabled={importing} className="bg-green-600 text-white px-5 h-10 rounded-xl text-[11px] font-black uppercase tracking-wider hover:bg-green-700 disabled:opacity-50">Scan</button>
+                      <button onClick={handleSpotifyImport} disabled={importing} className="bg-green-600 text-white px-5 h-10 rounded-xl text-[11px] font-black uppercase tracking-wider hover:bg-green-700 disabled:opacity-50">Import</button>
                       <button onClick={fetchSpotifyPlaylists} className="p-2.5 text-gray-400 hover:text-green-600 rounded-xl bg-gray-50"><RefreshCw className={`w-4 h-4 ${playlistsLoading ? 'animate-spin' : ''}`} /></button>
                     </div>
                   )}
@@ -579,6 +713,31 @@ const Library = () => {
           </div>
         </div>
       </div>
+
+      {/* Real-time Lyrics Fetching Banner */}
+      {lyricsTaskStatus && (
+        <div className="bg-primary/5 border border-primary/10 rounded-[24px] p-4 flex flex-col md:flex-row items-start md:items-center justify-between gap-4 shadow-sm animate-in fade-in slide-in-from-top-4 duration-500">
+          <div className="flex items-center gap-4">
+            <div className="w-12 h-12 rounded-2xl bg-white shadow-sm flex items-center justify-center border border-primary/10">
+               <Loader2 className="w-5 h-5 text-primary animate-spin" />
+            </div>
+            <div>
+              <h4 className="text-sm font-black text-gray-900 tracking-tight">{lyricsTaskStatus.message || "Fetching Lyrics..."}</h4>
+              <p className="text-xs font-bold text-gray-500 mt-0.5">
+                {lyricsTaskStatus.total > 0 ? `Processed ${lyricsTaskStatus.progress} of ${lyricsTaskStatus.total} tracks` : 'Warming up engines...'}
+              </p>
+            </div>
+          </div>
+          {lyricsTaskStatus.total > 0 && (
+             <div className="w-full md:w-64 h-3 bg-white rounded-full overflow-hidden shadow-inner border border-gray-100">
+                <div 
+                  className="h-full bg-primary transition-all duration-500 ease-out" 
+                  style={{ width: `${(lyricsTaskStatus.progress / lyricsTaskStatus.total) * 100}%` }}
+                />
+             </div>
+          )}
+        </div>
+      )}
 
       {/* Table Hub */}
       <div className="bg-white rounded-[32px] border border-gray-100 shadow-xl shadow-gray-200/40 overflow-hidden">
@@ -617,9 +776,14 @@ const Library = () => {
                 </td>
                 <td className="px-4 py-4">
                    <div className="flex items-center gap-3">
-                      <div className="flex flex-col gap-0.5">
-                        <span className="text-[10px] font-black text-primary uppercase tracking-widest">{track.genre || 'MIX'}</span>
-                        <div className="w-16 h-1 bg-gray-100 rounded-full overflow-hidden">
+                      <div className="flex flex-col gap-1">
+                        <div className="flex flex-wrap gap-1">
+                          {track.genre && <span className="text-[9px] px-1.5 py-0.5 bg-purple-50 text-purple-600 rounded-md font-black uppercase tracking-widest">{track.genre.split(',')[0]}</span>}
+                          {track.themes && <span className="text-[9px] px-1.5 py-0.5 bg-amber-50 text-amber-600 rounded-md font-black uppercase tracking-widest">{track.themes.split(',')[0]}</span>}
+                          {track.emotions && <span className="text-[9px] px-1.5 py-0.5 bg-rose-50 text-rose-600 rounded-md font-black uppercase tracking-widest">{track.emotions.split(',')[0]}</span>}
+                          {!track.genre && !track.themes && <span className="text-[9px] px-1.5 py-0.5 bg-gray-50 text-gray-400 rounded-md font-black uppercase tracking-widest">UNCLASSIFIED</span>}
+                        </div>
+                        <div className="w-16 h-1 bg-gray-100 rounded-full overflow-hidden mt-1">
                            <div className="bg-primary h-full transition-all" style={{ width: `${(track.energy || 0.5) * 100}%` }} />
                         </div>
                       </div>
@@ -677,25 +841,100 @@ const Library = () => {
             <div className="flex-1 overflow-y-auto p-10 grid grid-cols-1 lg:grid-cols-2 gap-10">
               <div className="space-y-8">
                 <img src={selectedTrack.thumbnail_url || ''} alt="" className="aspect-square w-full rounded-[32px] object-cover shadow-xl" />
-                <div className="grid grid-cols-2 gap-4">
-                  <div className="bg-gray-50 p-6 rounded-3xl"><div className="flex items-center gap-2 mb-2"><Activity className="w-4 h-4 text-primary" /><span className="text-[10px] font-black text-gray-400 uppercase">Tempo</span></div><p className="text-2xl font-black">{selectedTrack.bpm ? Math.round(selectedTrack.bpm) : '--'} <span className="text-xs">BPM</span></p></div>
-                  <div className="bg-gray-50 p-6 rounded-3xl"><div className="flex items-center gap-2 mb-2"><Zap className="w-4 h-4 text-orange-500" /><span className="text-[10px] font-black text-gray-400 uppercase">Energy</span></div><p className="text-2xl font-black">{selectedTrack.energy ? Math.round(selectedTrack.energy * 100) : '--'}%</p></div>
+                
+                {/* Classification Data */}
+                <div className="space-y-4">
+                  <div className="flex items-center gap-2 mb-4">
+                    <Activity className="w-4 h-4 text-primary" />
+                    <span className="text-[10px] font-black text-gray-400 uppercase tracking-widest">Smart Classification</span>
+                    {enriching && <Loader2 className="w-3 h-3 animate-spin text-primary ml-auto" />}
+                  </div>
+                  
+                  <div className="flex flex-wrap gap-2">
+                    {/* Genre Tags */}
+                    {selectedTrack.genre && selectedTrack.genre.split(',').map((g: string, i: number) => (
+                      <span key={`genre-${i}`} className="px-4 py-2 bg-purple-50 text-purple-600 rounded-full text-xs font-bold uppercase tracking-wider border border-purple-100">
+                        {g.trim()}
+                      </span>
+                    ))}
+                    
+                    {/* Mood Tags */}
+                    {selectedTrack.mood && selectedTrack.mood.split(',').map((m: string, i: number) => (
+                      <span key={`mood-${i}`} className="px-4 py-2 bg-blue-50 text-blue-600 rounded-full text-xs font-bold uppercase tracking-wider border border-blue-100">
+                        {m.trim()}
+                      </span>
+                    ))}
+
+                    {/* Theme Tags */}
+                    {selectedTrack.themes && selectedTrack.themes.split(',').map((t: string, i: number) => (
+                      <span key={`theme-${i}`} className="px-4 py-2 bg-amber-50 text-amber-600 rounded-full text-xs font-bold uppercase tracking-wider border border-amber-100">
+                        {t.trim()}
+                      </span>
+                    ))}
+
+                    {/* Emotion Tags */}
+                    {selectedTrack.emotions && selectedTrack.emotions.split(',').map((e: string, i: number) => (
+                      <span key={`emotion-${i}`} className="px-4 py-2 bg-rose-50 text-rose-600 rounded-full text-xs font-bold uppercase tracking-wider border border-rose-100">
+                        {e.trim()}
+                      </span>
+                    ))}
+
+                    {/* Context Tags */}
+                    {selectedTrack.contexts && selectedTrack.contexts.split(',').map((c: string, i: number) => (
+                      <span key={`context-${i}`} className="px-4 py-2 bg-emerald-50 text-emerald-600 rounded-full text-xs font-bold uppercase tracking-wider border border-emerald-100">
+                        {c.trim()}
+                      </span>
+                    ))}
+                    
+                    {/* Release Year */}
+                    {selectedTrack.release_year && (
+                      <span className="px-4 py-2 bg-gray-50 text-gray-600 rounded-full text-xs font-bold uppercase tracking-wider border border-gray-200">
+                        {selectedTrack.release_year}
+                      </span>
+                    )}
+
+                    {/* Popularity */}
+                    {selectedTrack.popularity !== undefined && selectedTrack.popularity !== null && (
+                      <span className="px-4 py-2 bg-orange-50 text-orange-600 rounded-full text-xs font-bold uppercase tracking-wider border border-orange-100 flex items-center gap-1">
+                        <Zap className="w-3 h-3" /> {selectedTrack.popularity} Pop
+                      </span>
+                    )}
+                    
+                    {/* Explicit */}
+                    {selectedTrack.explicit && (
+                      <span className="px-4 py-2 bg-red-50 text-red-600 rounded-full text-xs font-bold uppercase tracking-wider border border-red-100 flex items-center gap-1">
+                        <X className="w-3 h-3" /> Explicit
+                      </span>
+                    )}
+
+                    {!selectedTrack.genre && !selectedTrack.mood && !enriching && (
+                      <span className="text-xs font-bold text-gray-400">No classification data available</span>
+                    )}
+                  </div>
                 </div>
               </div>
               <div className="flex flex-col min-h-[400px]">
-                <div className="flex items-center gap-3 mb-6"><Mic className="w-5 h-5 text-gray-400" /><h4 className="text-sm font-black text-gray-900 uppercase tracking-[0.2em]">Lyrics</h4></div>
+                <div className="flex items-center justify-between mb-6">
+                  <div className="flex items-center gap-3"><Mic className="w-5 h-5 text-gray-400" /><h4 className="text-sm font-black text-gray-900 uppercase tracking-[0.2em]">Lyrics</h4></div>
+                  {enriching && <Loader2 className="w-5 h-5 animate-spin text-gray-400" />}
+                </div>
                 <div className="flex-1 bg-gray-50 rounded-[32px] p-8 border border-gray-100 overflow-y-auto">
                   {selectedTrack.lyrics ? (
                     <pre className="text-sm font-bold text-gray-600 leading-relaxed whitespace-pre-wrap font-sans">{selectedTrack.lyrics}</pre>
-                  ) : selectedTrack.last_enriched_at ? (
+                  ) : enriching ? (
+                    <div className="h-full flex flex-col items-center justify-center text-center opacity-40">
+                      <Loader2 className="w-10 h-10 animate-spin mb-4" />
+                      <p className="text-xs font-black uppercase">Fetching lyrics...</p>
+                    </div>
+                  ) : selectedTrack.lyrics_not_found ? (
                     <div className="h-full flex flex-col items-center justify-center text-center opacity-40 text-gray-500">
                        <Mic className="w-10 h-10 mb-4 opacity-50" />
                        <p className="text-xs font-black uppercase">No lyrics found for this track</p>
                     </div>
                   ) : (
-                    <div className="h-full flex flex-col items-center justify-center text-center opacity-30">
-                      <Loader2 className="w-10 h-10 animate-spin mb-4" />
-                      <p className="text-xs font-black uppercase">Pending enrichment...</p>
+                    <div className="h-full flex flex-col items-center justify-center text-center opacity-40 text-gray-500">
+                       <Mic className="w-10 h-10 mb-4 opacity-50" />
+                       <p className="text-xs font-black uppercase">No lyrics available</p>
                     </div>
                   )}
                 </div>

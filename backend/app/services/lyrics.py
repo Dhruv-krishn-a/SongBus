@@ -36,14 +36,26 @@ class LyricsService:
 
     @staticmethod
     async def async_fetch_lyrics(client: httpx.AsyncClient, title: str, artist: str, album: str = None, duration_ms: int = None) -> str | None:
-        """
-        Fetches lyrics asynchronously using a multi-stage matching strategy.
-        """
+        import asyncio
         clean_title = LyricsService._clean_string(title)
         clean_artist = LyricsService._clean_string(artist)
 
+        async def _make_request(url: str, params: dict = None) -> httpx.Response | None:
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    response = await client.get(url, params=params, headers=LyricsService.HEADERS, timeout=15.0)
+                    if response.status_code == 429:
+                        await asyncio.sleep(3 ** attempt)
+                        continue
+                    return response
+                except httpx.TimeoutException:
+                    pass
+                except Exception as e:
+                    pass
+            return None
+
         try:
-            # --- STAGE 1: Exact Signature Match ---
             if duration_ms:
                 duration_sec = duration_ms // 1000
                 params = {
@@ -51,43 +63,41 @@ class LyricsService:
                     "artist_name": clean_artist,
                     "duration": duration_sec
                 }
-                if album:
-                    params["album_name"] = LyricsService._clean_string(album)
+                if album: params["album_name"] = LyricsService._clean_string(album)
                 
-                response = await client.get(f"{LyricsService.BASE_URL}/get", params=params, headers=LyricsService.HEADERS)
-                if response.status_code == 200:
+                response = await _make_request(f"{LyricsService.BASE_URL}/get", params=params)
+                if response and response.status_code == 200:
                     data = response.json()
                     if data.get("instrumental"): return "Instrumental"
                     return data.get("syncedLyrics") or data.get("plainLyrics")
 
-            # --- STAGE 2: Weighted Search ---
             search_query = f"{clean_title} {clean_artist}"
             encoded_query = urllib.parse.quote(search_query)
             
-            response = await client.get(f"{LyricsService.BASE_URL}/search?q={encoded_query}", headers=LyricsService.HEADERS)
-            
-            if response.status_code == 200:
+            response = await _make_request(f"{LyricsService.BASE_URL}/search?q={encoded_query}")
+            if response and response.status_code == 200:
                 results = response.json()
-                if results and len(results) > 0:
+                valid_results = [r for r in results if r.get("syncedLyrics") or r.get("plainLyrics")]
+                print(f"LRCLIB: found {len(valid_results)} valid results")
+                
+                if valid_results and len(valid_results) > 0:
                     best_match = None
                     if duration_ms:
                         duration_sec = duration_ms // 1000
-                        for res in results:
-                            res_duration = res.get("duration")
-                            if res_duration and abs(res_duration - duration_sec) <= 4:
+                        for res in valid_results:
+                            if res.get("duration") and abs(res.get("duration") - duration_sec) <= 4:
                                 best_match = res
                                 break
-                    
-                    if not best_match:
-                        best_match = results[0]
-                    
+                    if not best_match: best_match = valid_results[0]
+                    print(f"LRCLIB: using best_match id {best_match.get('id')}")
                     if best_match.get("instrumental"): return "Instrumental"
                     return best_match.get("syncedLyrics") or best_match.get("plainLyrics")
             
-            # --- STAGE 3: Recursive Regional Fallback ---
+            print(f"LRCLIB: no 200 response or no results. status: {response.status_code if response else 'None'}")
+            
             if "various" in artist.lower():
-                response = await client.get(f"{LyricsService.BASE_URL}/search?q={encoded_query}", headers=LyricsService.HEADERS)
-                if response.status_code == 200:
+                response = await _make_request(f"{LyricsService.BASE_URL}/search?q={encoded_query}")
+                if response and response.status_code == 200:
                     results = response.json()
                     if results: return results[0].get("syncedLyrics") or results[0].get("plainLyrics")
 
@@ -95,6 +105,8 @@ class LyricsService:
             
         except Exception as e:
             print(f"LRCLIB Async Error for {title}: {e}")
+            import traceback
+            traceback.print_exc()
             return None
 
     @staticmethod
@@ -121,7 +133,7 @@ class LyricsService:
                 if album:
                     params["album_name"] = LyricsService._clean_string(album)
                 
-                response = requests.get(f"{LyricsService.BASE_URL}/get", params=params, headers=LyricsService.HEADERS, timeout=5)
+                response = requests.get(f"{LyricsService.BASE_URL}/get", params=params, headers=LyricsService.HEADERS, timeout=2)
                 if response.status_code == 200:
                     data = response.json()
                     # We prefer Synced > Plain > Instrumental (None)
@@ -133,7 +145,7 @@ class LyricsService:
             search_query = f"{clean_title} {clean_artist}"
             encoded_query = urllib.parse.quote(search_query)
             
-            response = requests.get(f"{LyricsService.BASE_URL}/search?q={encoded_query}", headers=LyricsService.HEADERS, timeout=5)
+            response = requests.get(f"{LyricsService.BASE_URL}/search?q={encoded_query}", headers=LyricsService.HEADERS, timeout=2)
             
             if response.status_code == 200:
                 results = response.json()
@@ -159,13 +171,16 @@ class LyricsService:
             # Special logic for Pakistani/Indian songs where artists might be "Various" 
             # or the title might contain regional suffixes.
             if "various" in artist.lower():
-                response = requests.get(f"{LyricsService.BASE_URL}/search?q={encoded_query}", headers=LyricsService.HEADERS, timeout=5)
+                response = requests.get(f"{LyricsService.BASE_URL}/search?q={encoded_query}", headers=LyricsService.HEADERS, timeout=2)
                 if response.status_code == 200:
                     results = response.json()
                     if results: return results[0].get("syncedLyrics") or results[0].get("plainLyrics")
 
             return None
             
+        except requests.exceptions.Timeout:
+            # Silently fail on lyrics timeout to keep the import moving
+            return None
         except Exception as e:
             print(f"LRCLIB Error for {title}: {e}")
             return None

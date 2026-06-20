@@ -67,10 +67,28 @@ def get_task(task_id: str) -> Dict[str, Any]:
     finally:
         db.close()
 
+from datetime import datetime, timedelta
+
 def get_active_tasks(user_id: int) -> List[Dict[str, Any]]:
-    """Returns all running or pending tasks for a user."""
+    """Returns all running or pending tasks for a user. Cleans up zombie tasks."""
     db = SessionLocal()
     try:
+        # Optimization: Fail tasks that haven't been updated in 2 minutes (Zombies)
+        two_minutes_ago = datetime.utcnow() - timedelta(minutes=2)
+        zombies = db.query(schema.BackgroundTask).filter(
+            schema.BackgroundTask.owner_id == user_id,
+            schema.BackgroundTask.status.in_(["running", "pending"]),
+            schema.BackgroundTask.updated_at < two_minutes_ago
+        ).all()
+        
+        for z in zombies:
+            z.status = "failed"
+            z.error = "Task timed out or backend restarted."
+            z.updated_at = datetime.utcnow()
+        
+        if zombies:
+            db.commit()
+
         active_tasks = db.query(schema.BackgroundTask).filter(
             schema.BackgroundTask.owner_id == user_id,
             schema.BackgroundTask.status.in_(["pending", "running"])
