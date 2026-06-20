@@ -177,10 +177,26 @@ def spotify_callback(
     current_user: schema.User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
+    import logging
+    logger = logging.getLogger("songbus.spotify_callback")
+    
     spotify_service = SpotifyService()
     try:
+        logger.info(f"[spotify_callback] Processing OAuth callback for user id={current_user.id}")
+        logger.info(f"[spotify_callback] Code prefix: {data.code[:20]}...")
+        
         # Request access token using the code
         token_info = spotify_service.auth_manager.get_access_token(data.code)
+        
+        # Log the full token response (sans actual tokens for security)
+        logger.info(f"[spotify_callback] Token response keys: {list(token_info.keys())}")
+        if 'scope' in token_info:
+            logger.info(f"[spotify_callback] GRANTED SCOPES: {token_info['scope']}")
+        else:
+            logger.warning(f"[spotify_callback] WARNING: No 'scope' field in token response!")
+        logger.info(f"[spotify_callback] expires_in: {token_info.get('expires_in')}")
+        logger.info(f"[spotify_callback] token_type: {token_info.get('token_type')}")
+        logger.info(f"[spotify_callback] has refresh_token: {bool(token_info.get('refresh_token'))}")
         
         # Save token info
         current_user.spotify_access_token = token_info.get("access_token")
@@ -193,10 +209,19 @@ def spotify_callback(
         spotify_me = client.me()
         current_user.spotify_id = spotify_me.get("id")
         
+        logger.info(f"[spotify_callback] Spotify user profile:")
+        logger.info(f"  -> id           : {spotify_me.get('id')}")
+        logger.info(f"  -> display_name : {spotify_me.get('display_name')}")
+        logger.info(f"  -> product      : {spotify_me.get('product')}")
+        logger.info(f"  -> country      : {spotify_me.get('country')}")
+        logger.info(f"  -> type         : {spotify_me.get('type')}")
+        
         db.commit()
         
+        logger.info(f"[spotify_callback] Spotify connected successfully for {current_user.spotify_id}")
         return {"message": "Spotify connected successfully", "spotify_id": current_user.spotify_id}
     except Exception as e:
+        logger.error(f"[spotify_callback] FAILED: {type(e).__name__}: {e}")
         raise HTTPException(status_code=400, detail=f"Failed to connect Spotify: {str(e)}")
 
 @router.get("/youtube/auth-url")

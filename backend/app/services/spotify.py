@@ -1,4 +1,5 @@
 import os
+import logging
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
 from datetime import datetime, timedelta
@@ -7,6 +8,8 @@ from sqlalchemy.orm import Session
 from fastapi import HTTPException
 import httpx
 import asyncio
+
+logger = logging.getLogger("songbus.spotify")
 
 class SpotifyService:
     def __init__(self):
@@ -69,16 +72,34 @@ class SpotifyService:
             raise HTTPException(status_code=500, detail="Spotify API keys not configured in .env")
 
         now = datetime.utcnow()
+        token_prefix = (user.spotify_access_token or "")[:20]
+        logger.info(f"[get_valid_client] DB user id={user.id}, spotify_id={user.spotify_id}")
+        logger.info(f"[get_valid_client] Token prefix: {token_prefix}..., expiry: {user.spotify_token_expiry}, now: {now}")
+        logger.info(f"[get_valid_client] Has refresh_token: {bool(user.spotify_refresh_token)}")
+
         if user.spotify_token_expiry and now >= (user.spotify_token_expiry - timedelta(minutes=5)):
-            # Refresh token
-            token_info = self.auth_manager.refresh_access_token(user.spotify_refresh_token)
-            user.spotify_access_token = token_info['access_token']
-            if 'refresh_token' in token_info:
-                user.spotify_refresh_token = token_info['refresh_token']
-            
-            expires_in = token_info.get("expires_in", 3600)
-            user.spotify_token_expiry = datetime.utcnow() + timedelta(seconds=expires_in)
-            db.commit()
+            logger.info(f"[get_valid_client] Token expired or expiring soon — refreshing...")
+            try:
+                token_info = self.auth_manager.refresh_access_token(user.spotify_refresh_token)
+                user.spotify_access_token = token_info['access_token']
+                if 'refresh_token' in token_info:
+                    user.spotify_refresh_token = token_info['refresh_token']
+                
+                expires_in = token_info.get("expires_in", 3600)
+                user.spotify_token_expiry = datetime.utcnow() + timedelta(seconds=expires_in)
+                db.commit()
+                logger.info(f"[get_valid_client] Token refreshed successfully. New expiry: {user.spotify_token_expiry}")
+                logger.info(f"[get_valid_client] Refresh response keys: {list(token_info.keys())}")
+                # Log the scopes that came back with the refreshed token
+                if 'scope' in token_info:
+                    logger.info(f"[get_valid_client] Refreshed token scopes: {token_info['scope']}")
+                else:
+                    logger.warning(f"[get_valid_client] No 'scope' field in refresh response")
+            except Exception as e:
+                logger.error(f"[get_valid_client] Token refresh FAILED: {type(e).__name__}: {e}")
+                raise
+        else:
+            logger.info(f"[get_valid_client] Token still valid, no refresh needed")
 
         return spotipy.Spotify(auth=user.spotify_access_token)
 
@@ -119,17 +140,63 @@ class SpotifyService:
         except Exception:
             return None
 
-    def create_playlist(self, client: spotipy.Spotify, user_id: str, name: str, description: str = ""):
-        if not user_id:
-            try:
-                user_id = client.me().get("id")
-            except Exception as e:
-                print(f"Error fetching Spotify profile: {e}")
-                raise e
+    def create_playlist(self, client: spotipy.Spotify, user_id: str = None, name: str = "", description: str = ""):
+        # Always fetch the real user ID from the current token to avoid 403 errors.
+        # The stored spotify_id can become stale after token refresh.
+        logger.info(f"[create_playlist] Called with passed user_id={user_id}, playlist name='{name}'")
+        
+        # --- Step 1: Verify token validity by calling /me ---
         try:
-            return client.user_playlist_create(user=user_id, name=name, public=False, description=description)
+            me = client.me()
+            actual_user_id = me.get("id")
+            product = me.get("product", "unknown")
+            display_name = me.get("display_name", "unknown")
+            logger.info(f"[create_playlist] client.me() succeeded:")
+            logger.info(f"  -> actual user_id  = {actual_user_id}")
+            logger.info(f"  -> display_name    = {display_name}")
+            logger.info(f"  -> product (plan)  = {product}")
+            logger.info(f"  -> passed user_id  = {user_id}")
+            logger.info(f"  -> IDs match?      = {actual_user_id == user_id}")
         except Exception as e:
-            print(f"Spotify create_playlist failed for user {user_id}: {e}")
+            logger.error(f"[create_playlist] client.me() FAILED — token is likely invalid: {type(e).__name__}: {e}")
+            if hasattr(e, 'http_status'):
+                logger.error(f"  -> HTTP status: {e.http_status}")
+            raise e
+        
+        # --- Step 2: Check token scopes by inspecting the auth header ---
+        try:
+            token = client._auth
+            logger.info(f"[create_playlist] Token prefix: {str(token)[:25]}...")
+            # Try to decode the token to inspect scopes (won't work for opaque tokens but worth trying)
+            import requests
+            check_resp = requests.get(
+                "https://api.spotify.com/v1/me",
+                headers={"Authorization": f"Bearer {token}"}
+            )
+            logger.info(f"[create_playlist] Raw /v1/me status: {check_resp.status_code}")
+            if check_resp.status_code != 200:
+                logger.error(f"[create_playlist] Raw /v1/me response body: {check_resp.text[:500]}")
+        except Exception as e:
+            logger.warning(f"[create_playlist] Token inspection failed (non-critical): {e}")
+
+        # --- Step 3: Attempt to create the playlist ---
+        try:
+            logger.info(f"[create_playlist] Calling user_playlist_create(user={actual_user_id}, name='{name}', public=False)")
+            result = client.user_playlist_create(user=actual_user_id, name=name, public=False, description=description)
+            logger.info(f"[create_playlist] SUCCESS! Spotify playlist created: id={result.get('id')}, url={result.get('external_urls', {}).get('spotify')}")
+            return result
+        except Exception as e:
+            logger.error(f"[create_playlist] FAILED to create playlist: {type(e).__name__}: {e}")
+            if hasattr(e, 'http_status'):
+                logger.error(f"  -> HTTP status : {e.http_status}")
+            if hasattr(e, 'msg'):
+                logger.error(f"  -> Error msg   : {e.msg}")
+            if hasattr(e, 'reason'):
+                logger.error(f"  -> Reason      : {e.reason}")
+            if hasattr(e, 'headers'):
+                logger.error(f"  -> Response hdrs: {dict(e.headers) if e.headers else 'N/A'}")
+            # Log the full repr for any other details
+            logger.error(f"  -> Full repr   : {repr(e)}")
             raise e
 
     def add_tracks_to_playlist(self, client: spotipy.Spotify, playlist_id: str, track_uris: list):

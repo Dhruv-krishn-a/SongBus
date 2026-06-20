@@ -184,6 +184,21 @@ def set_external_id(playlist: schema.Playlist, platform: str, external_id: str):
 @router.post("/export-spotify/{playlist_id}")
 def export_to_spotify(playlist_id: int, current_user: schema.User = Depends(get_current_user), db: Session = Depends(get_db)):
     """Exports a Smart Playlist to Spotify with intelligent matching."""
+    import logging
+    logger = logging.getLogger("songbus.export")
+    
+    logger.info(f"{'='*60}")
+    logger.info(f"[export_to_spotify] === EXPORT STARTED ===")
+    logger.info(f"[export_to_spotify] playlist_id={playlist_id}")
+    logger.info(f"[export_to_spotify] SongBus user id={current_user.id}, email={getattr(current_user, 'email', 'N/A')}")
+    logger.info(f"[export_to_spotify] spotify_id (stored)={current_user.spotify_id}")
+    logger.info(f"[export_to_spotify] has access_token={bool(current_user.spotify_access_token)}")
+    logger.info(f"[export_to_spotify] has refresh_token={bool(current_user.spotify_refresh_token)}")
+    logger.info(f"[export_to_spotify] token_expiry={current_user.spotify_token_expiry}")
+    if current_user.spotify_access_token:
+        logger.info(f"[export_to_spotify] token prefix={current_user.spotify_access_token[:20]}...")
+    logger.info(f"{'='*60}")
+    
     if not current_user.spotify_access_token:
         raise HTTPException(status_code=400, detail="Spotify is not connected. Visit Settings.")
         
@@ -204,12 +219,23 @@ def export_to_spotify(playlist_id: int, current_user: schema.User = Depends(get_
         raise HTTPException(status_code=400, detail="This playlist has no tracks to export.")
 
     spotify_service = SpotifyService()
-    client = spotify_service.get_valid_client(current_user, db)
+    logger.info(f"[export_to_spotify] SpotifyService created. redirect_uri={spotify_service.redirect_uri}")
+    logger.info(f"[export_to_spotify] Requested scopes={spotify_service.scope}")
+    
+    try:
+        client = spotify_service.get_valid_client(current_user, db)
+        logger.info(f"[export_to_spotify] Got valid Spotify client successfully")
+    except Exception as e:
+        logger.error(f"[export_to_spotify] get_valid_client FAILED: {type(e).__name__}: {e}")
+        raise
     
     # 1. Ensure Spotify Playlist exists
     sp_playlist_id = get_external_id(playlist, "spotify")
+    logger.info(f"[export_to_spotify] Existing spotify playlist_id from DB: {sp_playlist_id}")
+    
     if not sp_playlist_id:
         try:
+            logger.info(f"[export_to_spotify] No existing Spotify playlist — creating new one...")
             sp_playlist = spotify_service.create_playlist(
                 client=client,
                 user_id=current_user.spotify_id,
@@ -219,7 +245,11 @@ def export_to_spotify(playlist_id: int, current_user: schema.User = Depends(get_
             if not sp_playlist:
                 raise Exception("Failed to get playlist ID from Spotify.")
             sp_playlist_id = sp_playlist.get("id")
+            logger.info(f"[export_to_spotify] Created Spotify playlist: {sp_playlist_id}")
         except Exception as e:
+            logger.error(f"[export_to_spotify] Playlist creation FAILED: {type(e).__name__}: {e}")
+            if hasattr(e, "http_status"):
+                logger.error(f"[export_to_spotify] HTTP status: {e.http_status}")
             if hasattr(e, "http_status") and e.http_status == 403:
                 raise HTTPException(
                     status_code=403,

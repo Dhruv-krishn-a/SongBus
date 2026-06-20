@@ -2,8 +2,18 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.api import auth, music, integrations, youtube, playlists, tasks, transport
 from dotenv import load_dotenv
+import logging
 
 load_dotenv()
+
+# Configure logging so all songbus.* loggers output to console
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(name)s] [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
+)
+# Set songbus loggers to DEBUG for maximum detail
+logging.getLogger("songbus").setLevel(logging.DEBUG)
 
 app = FastAPI(
     title="PlaylistIQ API",
