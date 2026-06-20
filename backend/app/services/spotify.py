@@ -141,63 +141,48 @@ class SpotifyService:
             return None
 
     def create_playlist(self, client: spotipy.Spotify, user_id: str = None, name: str = "", description: str = ""):
-        # Always fetch the real user ID from the current token to avoid 403 errors.
-        # The stored spotify_id can become stale after token refresh.
-        logger.info(f"[create_playlist] Called with passed user_id={user_id}, playlist name='{name}'")
+        """
+        Creates a Spotify playlist using POST /v1/me/playlists.
         
-        # --- Step 1: Verify token validity by calling /me ---
-        try:
-            me = client.me()
-            actual_user_id = me.get("id")
-            product = me.get("product", "unknown")
-            display_name = me.get("display_name", "unknown")
-            logger.info(f"[create_playlist] client.me() succeeded:")
-            logger.info(f"  -> actual user_id  = {actual_user_id}")
-            logger.info(f"  -> display_name    = {display_name}")
-            logger.info(f"  -> product (plan)  = {product}")
-            logger.info(f"  -> passed user_id  = {user_id}")
-            logger.info(f"  -> IDs match?      = {actual_user_id == user_id}")
-        except Exception as e:
-            logger.error(f"[create_playlist] client.me() FAILED — token is likely invalid: {type(e).__name__}: {e}")
-            if hasattr(e, 'http_status'):
-                logger.error(f"  -> HTTP status: {e.http_status}")
-            raise e
+        NOTE: Spotify has deprecated POST /v1/users/{user_id}/playlists (returns 403).
+        We use /v1/me/playlists instead, which works correctly.
+        """
+        import requests as req
         
-        # --- Step 2: Check token scopes by inspecting the auth header ---
+        token = client._auth
+        logger.info(f"[create_playlist] Creating playlist '{name}' via /v1/me/playlists")
+        
         try:
-            token = client._auth
-            logger.info(f"[create_playlist] Token prefix: {str(token)[:25]}...")
-            # Try to decode the token to inspect scopes (won't work for opaque tokens but worth trying)
-            import requests
-            check_resp = requests.get(
-                "https://api.spotify.com/v1/me",
-                headers={"Authorization": f"Bearer {token}"}
+            resp = req.post(
+                "https://api.spotify.com/v1/me/playlists",
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "name": name,
+                    "description": description or "",
+                    "public": False
+                }
             )
-            logger.info(f"[create_playlist] Raw /v1/me status: {check_resp.status_code}")
-            if check_resp.status_code != 200:
-                logger.error(f"[create_playlist] Raw /v1/me response body: {check_resp.text[:500]}")
+            
+            if resp.status_code == 201:
+                result = resp.json()
+                logger.info(f"[create_playlist] SUCCESS! id={result.get('id')}, url={result.get('external_urls', {}).get('spotify')}")
+                return result
+            else:
+                body = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else resp.text
+                logger.error(f"[create_playlist] FAILED: status={resp.status_code}, body={body}")
+                raise spotipy.SpotifyException(
+                    resp.status_code,
+                    -1,
+                    f"Failed to create playlist: {body}"
+                )
+        except spotipy.SpotifyException:
+            raise
         except Exception as e:
-            logger.warning(f"[create_playlist] Token inspection failed (non-critical): {e}")
-
-        # --- Step 3: Attempt to create the playlist ---
-        try:
-            logger.info(f"[create_playlist] Calling user_playlist_create(user={actual_user_id}, name='{name}', public=False)")
-            result = client.user_playlist_create(user=actual_user_id, name=name, public=False, description=description)
-            logger.info(f"[create_playlist] SUCCESS! Spotify playlist created: id={result.get('id')}, url={result.get('external_urls', {}).get('spotify')}")
-            return result
-        except Exception as e:
-            logger.error(f"[create_playlist] FAILED to create playlist: {type(e).__name__}: {e}")
-            if hasattr(e, 'http_status'):
-                logger.error(f"  -> HTTP status : {e.http_status}")
-            if hasattr(e, 'msg'):
-                logger.error(f"  -> Error msg   : {e.msg}")
-            if hasattr(e, 'reason'):
-                logger.error(f"  -> Reason      : {e.reason}")
-            if hasattr(e, 'headers'):
-                logger.error(f"  -> Response hdrs: {dict(e.headers) if e.headers else 'N/A'}")
-            # Log the full repr for any other details
-            logger.error(f"  -> Full repr   : {repr(e)}")
-            raise e
+            logger.error(f"[create_playlist] Request error: {type(e).__name__}: {e}")
+            raise
 
     def add_tracks_to_playlist(self, client: spotipy.Spotify, playlist_id: str, track_uris: list):
         # Spotify allows max 100 tracks per request
