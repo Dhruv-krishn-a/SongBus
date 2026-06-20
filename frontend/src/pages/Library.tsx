@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { 
-  Wand2, X, Check, Search, ChevronLeft, ChevronRight, 
+  X, Check, Search, ChevronLeft, ChevronRight, 
   Music2, Clock, Trash2, ArrowUp, ArrowDown, 
   AlertCircle, Info, CheckCircle2, RefreshCw, Loader2, Brain,
   Activity, Zap, Mic, Globe, Sparkles
@@ -31,6 +31,10 @@ type Track = {
   lyrics?: string | null;
   spotify_uri?: string | null;
   last_enriched_at?: string | null;
+  lyrics_not_found?: boolean | null;
+  release_year?: string | null;
+  popularity?: number | null;
+  explicit?: boolean | null;
 };
 
 type YouTubePlaylist = {
@@ -99,10 +103,10 @@ const Library = () => {
 
   // Bulk Normalize states
   const [showBatchModal, setShowBatchModal] = useState(false);
-  const [previewData, setPreviewData] = useState<NormalizePreview[]>([]);
+  const [previewData] = useState<NormalizePreview[]>([]);
   const [selectedForBatch, setSelectedForBatch] = useState<Set<number>>(new Set());
   const [isBatchProcessing, setIsBatchProcessing] = useState(false);
-  const [isClassifyingAi, setIsClassifyingAi] = useState(false);
+
 
   // Track Details Modal
   const [selectedTrack, setSelectedTrack] = useState<Track | null>(null);
@@ -508,56 +512,6 @@ const Library = () => {
     else { setSortBy(field); setSortOrder('asc'); }
   };
 
-  const pollClassifyTask = useCallback(async (taskId: string) => {
-    const poll = async () => {
-      try {
-        const res = await fetch(`/api/tasks/${taskId}`, {
-          headers: { Authorization: `Bearer ${token}` }
-        });
-        if (!res.ok) { setIsClassifyingAi(false); return; }
-        const task = await res.json();
-        if (task.status === 'completed') {
-          setModal({ show: true, type: 'success', title: 'Complete', message: task.result?.message || 'Success.' });
-          setIsClassifyingAi(false);
-          handlePageChange(1);
-          return;
-        }
-        if (task.status === 'failed') {
-          setModal({ show: true, type: 'error', title: 'Failed', message: task.error || 'Error.' });
-          setIsClassifyingAi(false);
-          return;
-        }
-        setModal({ show: true, type: 'info', title: 'Analyzing...', message: task.message + (task.total ? ` (${task.progress} / ${task.total})` : '') });
-        setTimeout(poll, 5000);
-      } catch (err) { setIsClassifyingAi(false); }
-    };
-    poll();
-  }, [token, handlePageChange]);
-
-  const handleClassifyAi = async () => {
-    if (!token) return;
-    setIsClassifyingAi(true);
-    setModal({ show: true, type: 'info', title: 'AI classification', message: 'Gemini is working in the background...' });
-    try {
-      const res = await fetch('/api/music/classify-all', { method: 'POST', headers: { Authorization: `Bearer ${token}` } });
-      const data = await res.json();
-      if (res.ok && data.task_id) pollClassifyTask(data.task_id);
-      else setIsClassifyingAi(false);
-    } catch (err) { setIsClassifyingAi(false); }
-  };
-
-  const startBatchNormalize = async () => {
-    if (!token) return;
-    setLoading(true);
-    try {
-      const res = await fetch('/api/music/normalize/preview', { headers: { Authorization: `Bearer ${token}` } });
-      const data = await res.json();
-      setPreviewData(data.preview || []);
-      setSelectedForBatch(new Set((data.preview || []).map((p: NormalizePreview) => p.id)));
-      setShowBatchModal(true);
-    } catch (err) { console.error(err); }
-    finally { setLoading(false); }
-  };
 
   const handleBatchCommit = async () => {
     if (!token || selectedForBatch.size === 0) return;
@@ -630,7 +584,7 @@ const Library = () => {
                     const data = await res.json();
                     if(res.ok) {
                       setModal({ show: true, type: 'success', title: 'Database Cleaned', message: data.message });
-                      fetchTracks(page, search);
+                      fetchTracks(page);
                     }
                   } catch (e) {
                     console.error(e);
